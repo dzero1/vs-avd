@@ -6,7 +6,9 @@ View and control a headless Android emulator inside a VS Code webview panel, str
 
 - Lists your AVDs in a toolbar dropdown and launches the selected one headless (`-no-window`).
 - Streams the screen as **H.264 at ~30fps** via `screenrecord`, decoded in the webview with WebCodecs.
-- Click anywhere on the screen to send a tap through `adb shell input tap`.
+- **Mouse input**: click to tap, drag to swipe, scroll wheel to scroll.
+- **Keyboard input**: type into the device, plus special keys and Ctrl/Alt/Shift combos.
+- Hardware Back / Home / Recents buttons.
 - Fit-to-height / fit-to-width / zoom controls for the viewport.
 - Logs go to the **Android Emulator Viewer** output channel.
 
@@ -31,6 +33,7 @@ View and control a headless Android emulator inside a VS Code webview panel, str
 | --- | --- |
 | AVD dropdown | Populated from `emulator -list-avds` when the panel opens. Shows "No AVDs found" when empty. |
 | Status chip | Colour-coded dot — idle (grey), starting (pulsing amber), streaming (green), error (red). |
+| Boot loader | Replaces the placeholder while starting, with stepped phases and an elapsed clock. |
 | Fit height / Fit width | Scales the screen to the panel, preserving aspect ratio. Re-applies on panel resize. |
 | Zoom −/+ | Steps through 25%–300%. Stepping out of a fit mode starts from the resolved fit scale. |
 | ▶ / ■ | Start or stop the emulator. Buttons enable/disable to match session state. |
@@ -39,6 +42,60 @@ View and control a headless Android emulator inside a VS Code webview panel, str
 
 Icons are Material Symbols, inlined as an SVG sprite — the webview CSP blocks Google's icon
 font CDN, so the glyphs ship with the extension.
+
+## Boot progress
+
+Pressing start replaces the placeholder with a progress panel that steps through real,
+observed milestones rather than animating on a timer:
+
+| Phase | Detected by |
+| --- | --- |
+| Launching emulator | the `emulator` process has been spawned |
+| Connecting over adb | `adb devices` lists an `emulator-*` entry |
+| Waiting for shell | `adb shell echo ok` answers |
+| Booting Android | `sys.boot_completed` is being polled |
+| Starting stream | boot completed, resolution detected |
+
+Measured on a cold boot (`-no-snapshot-load`), the phases are genuinely distinct — the gap
+between `connected` and `shell` was ~7s, so these are not decorative steps:
+
+```
+ 1.0s  connected   (adb lists emulator)
+ 8.2s  shell       (device shell responds)
+12.3s  booted
+```
+
+A warm snapshot resume reaches `booted` in ~5s and skips visibly through the middle steps.
+The elapsed clock appears after 3s so short resumes don't flash a timer. The loader is cleared
+by any non-boot state transition, so a failed launch never leaves a spinner running.
+
+## Input
+
+Click the screen once to give it keyboard focus (a focus ring appears), then type.
+
+| Gesture | Maps to |
+| --- | --- |
+| Click | `input tap` |
+| Drag | chained `input swipe` segments |
+| Scroll wheel | `input swipe` in the opposite direction of the wheel |
+| Printable keys | `input text`, batched over 40ms so fast typing is one call |
+| Enter, Backspace, Delete, Tab, Esc, arrows, Home/End, PgUp/PgDn | `input keyevent KEYCODE_*` |
+| Ctrl/Alt/Shift/Cmd + letter or digit | `input keycombination` |
+
+Notes on why it works this way:
+
+- **All input goes through one persistent `adb shell`.** Spawning a process per event costs
+  70–145ms measured, which makes drag and scroll unusable. Reusing a shell over stdin drops
+  that to ~50ms, and a chained-swipe drag to ~86ms per segment (vs 286ms standalone).
+- **Drag maps to `input swipe`, not synthetic motion events.** A swipe is one native gesture
+  with real fling physics; a stream of individual move events is not, and scrolls feel dead.
+- **Drag has a movement threshold** (1.2% of the screen) so a slightly shaky click is still a
+  tap rather than a 2px swipe.
+- **Wheel events are coalesced** over 60ms into one gesture, otherwise a single scroll flick
+  queues a dozen competing swipes.
+- **`input text` treats `%s` as a space, and a bare `%` is literal.** Do *not* escape `%` as
+  `%%` — verified on device, `%%` arrives as two percent characters.
+- Escape maps to `KEYCODE_BACK`, which is the Android equivalent rather than a literal Esc.
 
 ## How the video pipeline works
 
@@ -79,7 +136,12 @@ Measured on a Pixel 5 AVD (1080×2340), versus the screenshot-polling approach t
 
 ## Known gaps
 
-- Input is tap-only — no swipe, no keyboard, no rotation.
+- No multi-touch (pinch-zoom, two-finger gestures) — `input` has no API for it. That needs the
+  scrcpy server protocol or raw `sendevent` writes.
+- No rotation control.
+- Drag latency is bounded by the ~86ms shell round-trip, so a fast flick is approximated by a
+  handful of swipe segments rather than tracking the cursor exactly.
+- A literal `%s` typed as text will arrive as a space; `input text` offers no way to escape it.
 - The emulator is stopped with `SIGTERM` rather than `adb emu kill`, so a wedged emulator can
   outlive the panel.
 - `avc1.42c02a` (Baseline 4.2) is hardcoded as the decoder config; it matches what the

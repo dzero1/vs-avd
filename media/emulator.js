@@ -10,6 +10,9 @@ const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const refreshBtn = document.getElementById('refreshBtn');
 const logsBtn = document.getElementById('logsBtn');
+const navBackBtn = document.getElementById('navBackBtn');
+const navHomeBtn = document.getElementById('navHomeBtn');
+const navRecentsBtn = document.getElementById('navRecentsBtn');
 const fitHeightBtn = document.getElementById('fitHeightBtn');
 const fitWidthBtn = document.getElementById('fitWidthBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
@@ -17,6 +20,10 @@ const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomLabel = document.getElementById('zoomLabel');
 const placeholderTitle = document.getElementById('placeholderTitle');
 const placeholderHint = document.getElementById('placeholderHint');
+const loaderTitle = document.getElementById('loaderTitle');
+const loaderFill = document.getElementById('loaderFill');
+const loaderSteps = document.getElementById('loaderSteps');
+const loaderElapsed = document.getElementById('loaderElapsed');
 
 // Detailed logs live in the "Android Emulator Viewer" output channel; the
 // webview only surfaces the one-line status.
@@ -276,6 +283,69 @@ window.addEventListener('resize', () => {
   if (viewMode === 'fitHeight' || viewMode === 'fitWidth') applyViewMode();
 });
 
+// --- boot progress --------------------------------------------------------
+// Phases arrive from the extension as they actually occur. 'shell' and
+// 'booting' share a step because a warm snapshot resume skips straight past
+// them, and showing a step that never lights up looks broken.
+const BOOT_ORDER = ['starting', 'connected', 'shell', 'booting', 'streaming'];
+const BOOT_LABELS = {
+  starting: 'Starting emulator…',
+  connected: 'Connecting over adb…',
+  shell: 'Waiting for the device shell…',
+  booting: 'Booting Android…',
+  booted: 'Boot complete…',
+  streaming: 'Starting the video stream…'
+};
+
+let bootStartedAt;
+let bootTicker;
+
+function stepIndex(phase) {
+  // 'booted' is a transient milestone between booting and streaming.
+  if (phase === 'booted') return BOOT_ORDER.indexOf('booting');
+  return BOOT_ORDER.indexOf(phase);
+}
+
+function showLoader(phase) {
+  stage.classList.add('stage--booting');
+  if (!bootStartedAt) {
+    bootStartedAt = performance.now();
+    // A cold boot can run 30-45s, so a running clock reassures that the wait is
+    // progressing even while one phase is stuck.
+    bootTicker = setInterval(() => {
+      const seconds = Math.round((performance.now() - bootStartedAt) / 1000);
+      loaderElapsed.textContent = seconds >= 3 ? `${seconds}s elapsed` : '';
+    }, 500);
+  }
+
+  loaderTitle.textContent = BOOT_LABELS[phase] || 'Starting…';
+
+  const active = stepIndex(phase);
+  const items = [...loaderSteps.children];
+  items.forEach((item, index) => {
+    item.classList.toggle('is-done', index < active);
+    item.classList.toggle('is-active', index === active);
+  });
+
+  // Progress reflects the furthest phase reached, not elapsed time.
+  const ratio = (active + 1) / (BOOT_ORDER.length + 1);
+  loaderFill.style.width = `${Math.round(ratio * 100)}%`;
+}
+
+function hideLoader() {
+  stage.classList.remove('stage--booting');
+  if (bootTicker) {
+    clearInterval(bootTicker);
+    bootTicker = undefined;
+  }
+  bootStartedAt = undefined;
+  loaderElapsed.textContent = '';
+  loaderFill.style.width = '0%';
+  for (const item of loaderSteps.children) {
+    item.classList.remove('is-done', 'is-active');
+  }
+}
+
 // --- AVD list -------------------------------------------------------------
 
 let avdNames = [];
@@ -316,10 +386,17 @@ avdSelect.addEventListener('change', () => {
 
 startBtn.addEventListener('click', () => {
   if (!avdSelect.value || avdNames.length === 0) return;
+  // Show the loader on click rather than waiting for the first boot message, so
+  // the button press has immediate feedback.
+  showLoader('starting');
+  startBtn.disabled = true;
   vscode.postMessage({ type: 'start', avdName: avdSelect.value });
 });
 
-stopBtn.addEventListener('click', () => vscode.postMessage({ type: 'stop' }));
+stopBtn.addEventListener('click', () => {
+  hideLoader();
+  vscode.postMessage({ type: 'stop' });
+});
 refreshBtn.addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
 logsBtn.addEventListener('click', () => vscode.postMessage({ type: 'showLogs' }));
 fitHeightBtn.addEventListener('click', () => setViewMode('fitHeight'));
@@ -327,16 +404,204 @@ fitWidthBtn.addEventListener('click', () => setViewMode('fitWidth'));
 zoomInBtn.addEventListener('click', () => stepZoom(1));
 zoomOutBtn.addEventListener('click', () => stepZoom(-1));
 
-canvas.addEventListener('click', (event) => {
+const navKey = (keycode) => () => vscode.postMessage({ type: 'key', keycode, meta: [] });
+navBackBtn.addEventListener('click', navKey('KEYCODE_BACK'));
+navHomeBtn.addEventListener('click', navKey('KEYCODE_HOME'));
+navRecentsBtn.addEventListener('click', navKey('KEYCODE_APP_SWITCH'));
+
+// --- pointer input --------------------------------------------------------
+// Coordinates are normalized 0..1 so the extension can scale them into full
+// device space regardless of the stream or zoom scale.
+
+const DRAG_THRESHOLD = 0.012; // fraction of the screen before a press is a drag
+const DRAG_SEGMENT_MS = 90; // matches measured shell round-trip; shorter just queues
+
+let pointer;
+
+function normalize(event) {
   const rect = canvas.getBoundingClientRect();
-  // Normalized so the extension can scale into full device resolution even
-  // though the video is streamed at half size.
-  vscode.postMessage({
-    type: 'tap',
+  return {
     nx: (event.clientX - rect.left) / rect.width,
     ny: (event.clientY - rect.top) / rect.height
-  });
+  };
+}
+
+canvas.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  const at = normalize(event);
+  pointer = { ...at, startX: at.nx, startY: at.ny, lastSent: 0, dragging: false };
+  canvas.setPointerCapture(event.pointerId);
+  event.preventDefault();
 });
+
+canvas.addEventListener('pointermove', (event) => {
+  if (!pointer) return;
+  const at = normalize(event);
+  const movedFar =
+    Math.hypot(at.nx - pointer.startX, at.ny - pointer.startY) > DRAG_THRESHOLD;
+
+  if (!pointer.dragging && !movedFar) return;
+  if (!pointer.dragging) canvas.classList.add('dragging');
+  pointer.dragging = true;
+
+  // Emit the drag as a chain of short native swipes. Throttling to the shell's
+  // real round-trip keeps the queue from growing faster than it drains.
+  const now = performance.now();
+  if (now - pointer.lastSent < DRAG_SEGMENT_MS) return;
+  pointer.lastSent = now;
+
+  vscode.postMessage({
+    type: 'swipe',
+    nx1: pointer.nx,
+    ny1: pointer.ny,
+    nx2: at.nx,
+    ny2: at.ny,
+    duration: DRAG_SEGMENT_MS
+  });
+  pointer.nx = at.nx;
+  pointer.ny = at.ny;
+});
+
+function endPointer(event) {
+  if (!pointer) return;
+  const at = normalize(event);
+
+  if (pointer.dragging) {
+    // Flush whatever is left so the gesture ends where the mouse actually is.
+    if (at.nx !== pointer.nx || at.ny !== pointer.ny) {
+      vscode.postMessage({
+        type: 'swipe',
+        nx1: pointer.nx,
+        ny1: pointer.ny,
+        nx2: at.nx,
+        ny2: at.ny,
+        duration: DRAG_SEGMENT_MS
+      });
+    }
+  } else {
+    vscode.postMessage({ type: 'tap', nx: at.nx, ny: at.ny });
+  }
+
+  pointer = undefined;
+  canvas.classList.remove('dragging');
+  if (canvas.hasPointerCapture?.(event.pointerId)) {
+    canvas.releasePointerCapture(event.pointerId);
+  }
+}
+
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', () => {
+  pointer = undefined;
+  canvas.classList.remove('dragging');
+});
+
+// Wheel scroll. Deltas are accumulated and flushed on a timer so a burst of
+// wheel events becomes one gesture rather than a queue of competing swipes.
+let wheelAccum = { dx: 0, dy: 0, nx: 0.5, ny: 0.5 };
+let wheelTimer;
+
+canvas.addEventListener(
+  'wheel',
+  (event) => {
+    event.preventDefault();
+    const at = normalize(event);
+    // deltaMode 1 is lines, 2 is pages; normalize everything to rough pixels.
+    const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
+    wheelAccum.dx += event.deltaX * factor;
+    wheelAccum.dy += event.deltaY * factor;
+    wheelAccum.nx = at.nx;
+    wheelAccum.ny = at.ny;
+
+    if (wheelTimer) return;
+    wheelTimer = setTimeout(() => {
+      wheelTimer = undefined;
+      const { dx, dy, nx, ny } = wheelAccum;
+      wheelAccum = { dx: 0, dy: 0, nx, ny };
+      if (dx === 0 && dy === 0) return;
+      // Scale up: a wheel notch should move more than its pixel delta suggests.
+      vscode.postMessage({ type: 'scroll', nx, ny, dx: dx * 2.5, dy: dy * 2.5 });
+    }, 60);
+  },
+  { passive: false }
+);
+
+// --- keyboard input -------------------------------------------------------
+
+// Keys that must go through `input keyevent` rather than `input text`.
+const KEYCODES = {
+  Enter: 'KEYCODE_ENTER',
+  Backspace: 'KEYCODE_DEL',
+  Delete: 'KEYCODE_FORWARD_DEL',
+  Tab: 'KEYCODE_TAB',
+  Escape: 'KEYCODE_BACK',
+  ArrowUp: 'KEYCODE_DPAD_UP',
+  ArrowDown: 'KEYCODE_DPAD_DOWN',
+  ArrowLeft: 'KEYCODE_DPAD_LEFT',
+  ArrowRight: 'KEYCODE_DPAD_RIGHT',
+  Home: 'KEYCODE_MOVE_HOME',
+  End: 'KEYCODE_MOVE_END',
+  PageUp: 'KEYCODE_PAGE_UP',
+  PageDown: 'KEYCODE_PAGE_DOWN'
+};
+
+function metaOf(event) {
+  const meta = [];
+  if (event.ctrlKey) meta.push('CTRL_LEFT');
+  if (event.altKey) meta.push('ALT_LEFT');
+  if (event.shiftKey) meta.push('SHIFT_LEFT');
+  if (event.metaKey) meta.push('META_LEFT');
+  return meta;
+}
+
+// Buffer printable characters so fast typing becomes one `input text` call
+// instead of one shell command per keystroke.
+let textBuffer = '';
+let textTimer;
+
+function flushText() {
+  textTimer = undefined;
+  if (!textBuffer) return;
+  vscode.postMessage({ type: 'text', text: textBuffer });
+  textBuffer = '';
+}
+
+function queueText(char) {
+  textBuffer += char;
+  if (!textTimer) textTimer = setTimeout(flushText, 40);
+}
+
+stage.addEventListener('keydown', (event) => {
+  if (!stage.classList.contains('stage--live')) return;
+
+  const mapped = KEYCODES[event.key];
+  const meta = metaOf(event);
+
+  if (mapped) {
+    flushText();
+    vscode.postMessage({ type: 'key', keycode: mapped, meta });
+    event.preventDefault();
+    return;
+  }
+
+  // A printable key with a modifier held is a shortcut, not text.
+  if (event.key.length === 1 && (event.ctrlKey || event.altKey || event.metaKey)) {
+    flushText();
+    const upper = event.key.toUpperCase();
+    if (/^[A-Z0-9]$/.test(upper)) {
+      vscode.postMessage({ type: 'key', keycode: `KEYCODE_${upper}`, meta });
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (event.key.length === 1) {
+    queueText(event.key);
+    event.preventDefault();
+  }
+});
+
+// The stage needs focus to receive keys; clicking the screen gives it focus.
+canvas.addEventListener('pointerdown', () => stage.focus());
 
 // --- extension messages ---------------------------------------------------
 
@@ -347,9 +612,17 @@ function applyState(state) {
   const live = LIVE_STATES.has(state);
   stage.classList.toggle('stage--live', live);
 
+  // Streaming means the first frame is on its way; anything that is not a boot
+  // state (STOPPED after a failure, IDLE) must also clear the loader.
+  if (!BUSY_STATES.has(state)) hideLoader();
+
   startBtn.disabled = live || BUSY_STATES.has(state) || avdNames.length === 0;
   stopBtn.disabled = !live && !BUSY_STATES.has(state);
   refreshBtn.disabled = !live;
+  for (const button of [navBackBtn, navHomeBtn, navRecentsBtn]) {
+    button.disabled = !live;
+  }
+  if (live) stage.focus();
 
   if (live) setStatus('Streaming', 'live');
   else if (BUSY_STATES.has(state)) setStatus('Starting…', 'busy');
@@ -368,6 +641,9 @@ window.addEventListener('message', (event) => {
       break;
     case 'status':
       setStatus(message.message, message.kind);
+      break;
+    case 'boot':
+      showLoader(message.phase);
       break;
     case 'state':
       applyState(message.state);
