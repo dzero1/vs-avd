@@ -1,5 +1,6 @@
 import * as cp from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 
@@ -20,7 +21,12 @@ class EmulatorSession {
   private emulatorProcess: cp.ChildProcess | undefined;
   private streamProcess: cp.ChildProcess | undefined;
   private streamGeneration = 0;
+  // Physical, rotation-independent resolution, as reported by `wm size`.
   private screenSize: { width: number; height: number } | undefined;
+  // Current display rotation (0-3). `wm size` and `input tap` both work in
+  // physical coordinates, but the video is rotated, so this is what reconciles
+  // a click on the canvas with the point it maps to on the device.
+  private rotation = 0;
   private panel: vscode.WebviewPanel | undefined;
   private avdName = '';
   private readonly outputChannel: vscode.OutputChannel;
@@ -94,6 +100,15 @@ class EmulatorSession {
       case 'refresh':
         await this.captureFrame();
         break;
+      case 'screenshot':
+        await this.saveScreenshot();
+        break;
+      case 'rotate':
+        await this.rotate(message.direction);
+        break;
+      case 'emu':
+        await this.emuCommand(message.args, message.label, message.freeText);
+        break;
       case 'showLogs':
         this.outputChannel.show(true);
         break;
@@ -154,6 +169,10 @@ class EmulatorSession {
 
       await this.waitForBoot();
       this.screenSize = await this.detectScreenSize();
+      // A snapshot can resume already rotated, so start from the real value
+      // rather than assuming portrait.
+      this.rotation = (await this.readDisplayRotation()) ?? 0;
+      this.sendToWebview({ type: 'rotation', rotation: this.rotation });
       this.reportBootProgress('streaming');
       this.setState('STREAMING');
       this.log('Emulator finished booting and streaming has started.');
@@ -355,6 +374,203 @@ class EmulatorSession {
     }
   }
 
+  // --- screenshot ----------------------------------------------------------
+
+  // Captures at full device resolution via screencap, not from the
+  // half-resolution video canvas, so the saved PNG is the real thing.
+  private async saveScreenshot(): Promise<void> {
+    if (this.state !== 'STREAMING') {
+      return;
+    }
+
+    this.sendToWebview({ type: 'status', message: 'Capturing screenshot…', kind: 'busy' });
+
+    try {
+      const imageBuffer = await this.runAdbBuffer(['exec-out', 'screencap', '-p']);
+
+      // Local-time stamp: a screenshot is filed by when the user took it, and
+      // ISO/UTC would read as the wrong day for anyone west of the meridian.
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp =
+        `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}` +
+        `-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const safeAvd = (this.avdName || 'emulator').replace(/[^\w.-]+/g, '_');
+      const fileName = `${safeAvd}-${stamp}.png`;
+
+      // Default into the workspace so the shot lands next to the code under
+      // test; fall back to the home directory when no folder is open.
+      const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
+      const target = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.joinPath(folder, fileName),
+        filters: { Images: ['png'] },
+        title: 'Save emulator screenshot'
+      });
+
+      if (!target) {
+        this.log('Screenshot cancelled.');
+        this.sendToWebview({ type: 'status', message: `Streaming ${this.avdName}`, kind: 'live' });
+        return;
+      }
+
+      await vscode.workspace.fs.writeFile(target, imageBuffer);
+      this.log(`Screenshot saved to ${target.fsPath}`);
+      this.sendToWebview({ type: 'status', message: 'Screenshot saved', kind: 'live' });
+
+      const open = await vscode.window.showInformationMessage(
+        `Screenshot saved to ${path.basename(target.fsPath)}`,
+        'Open',
+        'Reveal'
+      );
+      if (open === 'Open') {
+        await vscode.commands.executeCommand('vscode.open', target);
+      } else if (open === 'Reveal') {
+        await vscode.commands.executeCommand('revealFileInOS', target);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Screenshot failed: ${message}`);
+      vscode.window.showErrorMessage(`Screenshot failed: ${message}`);
+      this.sendToWebview({ type: 'status', message: `Screenshot failed: ${message}`, kind: 'error' });
+    }
+  }
+
+  // --- rotation ------------------------------------------------------------
+
+  // user_rotation is only honoured while auto-rotate is off, so
+  // accelerometer_rotation is cleared first.
+  private async rotate(direction: 'left' | 'right'): Promise<void> {
+    if (this.state !== 'STREAMING') {
+      return;
+    }
+
+    try {
+      const current = await this.runAdb(['shell', 'settings', 'get', 'system', 'user_rotation']);
+      const value = Number.parseInt(current.stdout.trim(), 10);
+      const from = Number.isInteger(value) && value >= 0 && value <= 3 ? value : 0;
+      // Rotation values step counter-clockwise: 0=portrait, 1=landscape-left,
+      // 2=portrait-flipped, 3=landscape-right.
+      const next = (from + (direction === 'left' ? 1 : 3)) % 4;
+
+      this.log(`Rotating ${direction}: user_rotation ${from} -> ${next}`);
+      await this.runAdb(['shell', 'settings', 'put', 'system', 'accelerometer_rotation', '0']);
+      await this.runAdb(['shell', 'settings', 'put', 'system', 'user_rotation', String(next)]);
+
+      // The window manager takes a moment to react, and an orientation-locked
+      // activity may refuse outright, so the effective rotation is read back
+      // rather than assumed.
+      await this.delay(700);
+      const applied = await this.readDisplayRotation();
+      this.rotation = applied ?? next;
+
+      if (applied !== undefined && applied !== next) {
+        // A foreground activity pinned to one orientation (the launcher does
+        // this) silently overrides user_rotation. Say so, because the button
+        // otherwise looks broken.
+        this.log(`Rotation requested ${next} but the display reports ${applied}.`);
+        this.sendToWebview({
+          type: 'status',
+          message: 'The current app is locked to one orientation',
+          kind: 'error'
+        });
+      } else {
+        const landscape = this.rotation === 1 || this.rotation === 3;
+        this.sendToWebview({
+          type: 'status',
+          message: landscape ? 'Rotated to landscape' : 'Rotated to portrait',
+          kind: 'live'
+        });
+      }
+
+      this.sendToWebview({ type: 'rotation', rotation: this.rotation });
+
+      // Note: `wm size` reports the physical panel and does not change with
+      // rotation, so screenSize is deliberately left alone — toDevice() maps
+      // through this.rotation instead.
+
+      // screenrecord captured the pre-rotation dimensions, so the segment must
+      // be replaced for the stream to match the new orientation.
+      this.restartVideoStream();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Rotate failed: ${message}`);
+      this.sendToWebview({ type: 'status', message: `Rotate failed: ${message}`, kind: 'error' });
+    }
+  }
+
+  // The rotation the window manager actually settled on, which can differ from
+  // what was requested when the foreground activity locks its orientation.
+  // `wm size` cannot answer this: it reports the physical panel regardless of
+  // rotation.
+  private async readDisplayRotation(): Promise<number | undefined> {
+    try {
+      const result = await this.runAdb(['shell', 'dumpsys', 'window']);
+      // Matches the window manager's own line: `    mRotation=1 mDeferred...`
+      const match = /^\s*mRotation=(\d)/m.exec(result.stdout);
+      if (match) {
+        return Number(match[1]);
+      }
+      this.log('Could not read mRotation from dumpsys window.');
+    } catch (error) {
+      this.log(`Unable to read display rotation: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return undefined;
+  }
+
+  // --- extended controls ---------------------------------------------------
+
+  // `adb emu` proxies to the emulator's console, which handles the auth token
+  // for us — no telnet handshake and no reading ~/.emulator_console_auth_token.
+  private async emuCommand(args: string[], label: string, freeText?: string): Promise<void> {
+    if (this.state !== 'STREAMING') {
+      return;
+    }
+
+    // Console arguments originate in the webview, so keep them to the literal
+    // alphabet the emulator console needs before they reach a process.
+    if (!Array.isArray(args) || args.length === 0 || args.length > 8) {
+      return;
+    }
+    if (!args.every((arg) => typeof arg === 'string' && /^[\w.@:+-]{1,64}$/.test(arg))) {
+      this.log(`Rejected console arguments: ${JSON.stringify(args)}`);
+      return;
+    }
+
+    // An SMS body is prose, so it can't be held to the argument alphabet. It is
+    // safe as a trailing argument because spawn() passes argv directly to the
+    // process without a shell — no quoting or metacharacters to escape. Control
+    // characters are still stripped, since the console protocol is line-based
+    // and a newline would be read as the start of a second command.
+    const trailing: string[] = [];
+    if (typeof freeText === 'string') {
+      const clean = freeText.replace(/[\r\n\x00-\x1f]/g, ' ').trim().slice(0, 300);
+      if (!clean) {
+        this.sendToWebview({ type: 'status', message: `${label} needs a message`, kind: 'error' });
+        return;
+      }
+      trailing.push(clean);
+    }
+    args = [...args, ...trailing];
+
+    try {
+      const result = await this.runAdb(['emu', ...args]);
+      const output = result.stdout.trim();
+      this.log(`emu ${args.join(' ')} -> ${output || 'OK'}`);
+
+      // The console answers 200-style text rather than a non-zero exit code, so
+      // a failure has to be read out of the body.
+      if (/^KO/m.test(output)) {
+        this.sendToWebview({ type: 'status', message: `${label} failed`, kind: 'error' });
+        return;
+      }
+      this.sendToWebview({ type: 'status', message: `${label} applied`, kind: 'live' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`emu ${args.join(' ')} failed: ${message}`);
+      this.sendToWebview({ type: 'status', message: `${label} failed: ${message}`, kind: 'error' });
+    }
+  }
+
   // --- input ---------------------------------------------------------------
 
   private ensureInputShell(): cp.ChildProcess | undefined {
@@ -409,10 +625,21 @@ class EmulatorSession {
     }
   }
 
-  // Normalized 0..1 -> full device pixels, so a half-resolution video stream
-  // still hits the right spot.
-  private toDevice(nx: number, ny: number): { x: number; y: number } {
+  // The coordinate space `input` works in, which is the rotated space the user
+  // is actually looking at — verified on device: in landscape, tapping an
+  // element's reported bounds directly hits it, with no axis remapping.
+  // `wm size` reports the physical panel and never changes with rotation, so
+  // the axes are swapped here instead.
+  private visibleSize(): { width: number; height: number } {
     const size = this.screenSize ?? { width: 1080, height: 2340 };
+    const landscape = this.rotation === 1 || this.rotation === 3;
+    return landscape ? { width: size.height, height: size.width } : size;
+  }
+
+  // Normalized 0..1 -> device pixels, so a half-resolution video stream still
+  // hits the right spot at any zoom or orientation.
+  private toDevice(nx: number, ny: number): { x: number; y: number } {
+    const size = this.visibleSize();
     return {
       x: Math.round(Math.min(Math.max(nx, 0), 1) * size.width),
       y: Math.round(Math.min(Math.max(ny, 0), 1) * size.height)
@@ -446,7 +673,8 @@ class EmulatorSession {
       return;
     }
     const { x, y } = this.toDevice(nx, ny);
-    const size = this.screenSize ?? { width: 1080, height: 2340 };
+    // Clamp against the visible space, since that is what the coordinates are in.
+    const size = this.visibleSize();
     // A wheel notch moves the content, so the finger travels the opposite way.
     const travelX = Math.round(Math.min(Math.max(-dx, -size.width), size.width));
     const travelY = Math.round(Math.min(Math.max(-dy, -size.height), size.height));
@@ -492,6 +720,7 @@ class EmulatorSession {
   private async stop(): Promise<void> {
     this.stopVideoStream();
     this.stopInputShell();
+    this.sendToWebview({ type: 'rotation', rotation: 0 });
 
     if (this.emulatorProcess && !this.emulatorProcess.killed) {
       this.log('Stopping emulator process.');
@@ -499,6 +728,7 @@ class EmulatorSession {
     }
     this.emulatorProcess = undefined;
     this.screenSize = undefined;
+    this.rotation = 0;
     this.setState('STOPPED');
     this.log('Session stopped.');
     this.sendToWebview({ type: 'status', message: 'Stopped' });

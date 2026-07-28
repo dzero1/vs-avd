@@ -10,7 +10,17 @@
       "Bash(node uitest.tmp.js)",
       "Bash(npm uninstall *)",
       "Bash(node verify.tmp.js)",
-      "Bash(node input.tmp.js)"
+      "Bash(node input.tmp.js)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(emulator -list-avds)",
+      "Bash(nohup emulator -avd Pixel8 -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect)",
+      "Bash(adb emu *)",
+      "Bash(adb shell *)",
+      "Bash(adb exec-out *)",
+      "Bash(xargs -I{} echo \"matching lines: {}\")",
+      "Bash(node --check media/emulator.js)",
+      "Bash(lsof -nP -iTCP:5554 -iTCP:5555)",
+      "Bash(rtk ps *)"
     ]
   }
 }
