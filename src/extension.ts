@@ -5,10 +5,17 @@ import * as vscode from 'vscode';
 
 type SessionState = 'IDLE' | 'BOOTING_EMULATOR' | 'BOOTED' | 'STARTING_SERVER' | 'STREAMING' | 'STOPPED';
 
+// screenrecord caps every session at 180s, so the stream is relaunched in a
+// loop. Each relaunch emits a fresh SPS/PPS + keyframe, which the decoder needs.
+const STREAM_SEGMENT_SECONDS = 170;
+const STREAM_BITRATE = 8_000_000;
+
 class EmulatorSession {
   private state: SessionState = 'IDLE';
   private emulatorProcess: cp.ChildProcess | undefined;
-  private screenshotTimer: NodeJS.Timeout | undefined;
+  private streamProcess: cp.ChildProcess | undefined;
+  private streamGeneration = 0;
+  private screenSize: { width: number; height: number } | undefined;
   private panel: vscode.WebviewPanel | undefined;
   private avdName = '';
   private readonly outputChannel: vscode.OutputChannel;
@@ -31,11 +38,7 @@ class EmulatorSession {
   }
 
   public dispose(): void {
-    this.stop();
-    if (this.screenshotTimer) {
-      clearInterval(this.screenshotTimer);
-      this.screenshotTimer = undefined;
-    }
+    void this.stop();
     this.outputChannel.dispose();
     this.panel = undefined;
   }
@@ -45,14 +48,17 @@ class EmulatorSession {
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.context.extensionUri, 'media', 'emulator.js'));
     const htmlPath = path.join(this.context.extensionPath, 'media', 'emulator.html');
     let html = fs.readFileSync(htmlPath, 'utf8');
-    html = html.replace('{{styleUri}}', styleUri.toString());
-    html = html.replace('{{scriptUri}}', scriptUri.toString());
-    html = html.replace('{{cspSource}}', webview.cspSource);
+    html = html.replaceAll('{{styleUri}}', styleUri.toString());
+    html = html.replaceAll('{{scriptUri}}', scriptUri.toString());
+    html = html.replaceAll('{{cspSource}}', webview.cspSource);
     return html;
   }
 
   private async handleMessage(message: any): Promise<void> {
     switch (message.type) {
+      case 'ready':
+        this.setState(this.state);
+        break;
       case 'start':
         await this.start(message.avdName);
         break;
@@ -60,7 +66,7 @@ class EmulatorSession {
         await this.stop();
         break;
       case 'tap':
-        await this.tap(message.x, message.y);
+        await this.tap(message.nx, message.ny);
         break;
       case 'refresh':
         await this.captureFrame();
@@ -70,7 +76,7 @@ class EmulatorSession {
     }
   }
 
-  private async start(avdName: string): Promise<void> {
+  public async start(avdName: string): Promise<void> {
     if (!avdName) {
       this.log('No AVD name provided.');
       vscode.window.showErrorMessage('Please provide an AVD name.');
@@ -114,10 +120,11 @@ class EmulatorSession {
       });
 
       await this.waitForBoot();
+      this.screenSize = await this.detectScreenSize();
       this.setState('STREAMING');
       this.log('Emulator finished booting and streaming has started.');
-      this.sendToWebview({ type: 'status', message: 'Emulator is ready. Streaming screenshots.' });
-      this.startScreenshotLoop();
+      this.sendToWebview({ type: 'status', message: 'Emulator is ready. Streaming H.264.' });
+      this.startVideoStream();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`Start failed: ${message}`);
@@ -152,26 +159,98 @@ class EmulatorSession {
     throw new Error('Timed out waiting for the Android emulator to finish booting.');
   }
 
-  private startScreenshotLoop(): void {
-    if (this.screenshotTimer) {
-      clearInterval(this.screenshotTimer);
+  private async detectScreenSize(): Promise<{ width: number; height: number } | undefined> {
+    try {
+      const result = await this.runAdb(['shell', 'wm', 'size']);
+      const match = /(\d+)x(\d+)/.exec(result.stdout);
+      if (match) {
+        const size = { width: Number(match[1]), height: Number(match[2]) };
+        this.log(`Detected device resolution ${size.width}x${size.height}`);
+        return size;
+      }
+    } catch (error) {
+      this.log(`Unable to detect screen size: ${error instanceof Error ? error.message : String(error)}`);
     }
+    return undefined;
+  }
 
-    this.log('Starting periodic screenshot capture loop.');
-    this.screenshotTimer = setInterval(() => {
-      void this.captureFrame();
-    }, 800);
+  // Stream half-resolution video: the decoder scales it back up for display and
+  // it roughly quarters the bitrate, which matters most on the emulator's
+  // software encoder. Tap coordinates stay in full device space.
+  private streamSize(): string | undefined {
+    if (!this.screenSize) {
+      return undefined;
+    }
+    const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+    return `${even(this.screenSize.width / 2)}x${even(this.screenSize.height / 2)}`;
+  }
+
+  private startVideoStream(): void {
+    const generation = (this.streamGeneration += 1);
+
+    const spawnSegment = () => {
+      if (this.state !== 'STREAMING' || generation !== this.streamGeneration) {
+        return;
+      }
+
+      const size = this.streamSize();
+      const args = [
+        'exec-out',
+        'screenrecord',
+        '--output-format=h264',
+        `--time-limit=${STREAM_SEGMENT_SECONDS}`,
+        `--bit-rate=${STREAM_BITRATE}`,
+        ...(size ? [`--size=${size}`] : []),
+        '-'
+      ];
+
+      this.log(`Starting video segment: adb ${args.join(' ')}`);
+      const child = cp.spawn('adb', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      this.streamProcess = child;
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        this.sendToWebview({ type: 'video', data: chunk.toString('base64') });
+      });
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        const text = chunk.toString().trim();
+        if (text) {
+          this.log(`screenrecord: ${text}`);
+        }
+      });
+
+      child.on('error', (error) => {
+        this.log(`Video stream failed: ${error.message}`);
+        this.sendToWebview({ type: 'status', message: `Video stream failed: ${error.message}` });
+      });
+
+      child.on('close', (code) => {
+        if (generation !== this.streamGeneration || this.state !== 'STREAMING') {
+          return;
+        }
+        this.log(`Video segment ended (code ${code ?? 'n/a'}); starting the next one.`);
+        // A new segment restarts the H.264 stream, so the webview must reset its
+        // decoder before the fresh SPS/PPS arrives.
+        this.sendToWebview({ type: 'videoReset' });
+        spawnSegment();
+      });
+    };
+
+    spawnSegment();
+  }
+
+  private stopVideoStream(): void {
+    this.streamGeneration += 1;
+    if (this.streamProcess && !this.streamProcess.killed) {
+      this.streamProcess.kill();
+    }
+    this.streamProcess = undefined;
   }
 
   private async captureFrame(): Promise<void> {
-    if (this.state !== 'STREAMING') {
-      return;
-    }
-
     try {
       const imageBuffer = await this.runAdbBuffer(['exec-out', 'screencap', '-p']);
-      const base64 = imageBuffer.toString('base64');
-      this.sendToWebview({ type: 'frame', data: base64 });
+      this.sendToWebview({ type: 'frame', data: imageBuffer.toString('base64') });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`Screenshot capture failed: ${message}`);
@@ -179,14 +258,20 @@ class EmulatorSession {
     }
   }
 
-  private async tap(x: number, y: number): Promise<void> {
-    if (this.state !== 'STREAMING') {
+  // Takes normalized 0..1 coordinates and scales them into full device space,
+  // so a half-resolution video stream still taps the right pixel.
+  private async tap(nx: number, ny: number): Promise<void> {
+    if (this.state !== 'STREAMING' || !Number.isFinite(nx) || !Number.isFinite(ny)) {
       return;
     }
 
+    const size = this.screenSize ?? { width: 1080, height: 2340 };
+    const x = Math.round(Math.min(Math.max(nx, 0), 1) * size.width);
+    const y = Math.round(Math.min(Math.max(ny, 0), 1) * size.height);
+
     try {
-      this.log(`Sending tap to emulator at (${Math.round(x)}, ${Math.round(y)})`);
-      await this.runAdb(['shell', 'input', 'tap', `${Math.round(x)}`, `${Math.round(y)}`]);
+      this.log(`Sending tap to emulator at (${x}, ${y})`);
+      await this.runAdb(['shell', 'input', 'tap', `${x}`, `${y}`]);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`Tap failed: ${message}`);
@@ -195,10 +280,7 @@ class EmulatorSession {
   }
 
   private async stop(): Promise<void> {
-    if (this.screenshotTimer) {
-      clearInterval(this.screenshotTimer);
-      this.screenshotTimer = undefined;
-    }
+    this.stopVideoStream();
 
     if (this.emulatorProcess && !this.emulatorProcess.killed) {
       this.log('Stopping emulator process.');
@@ -285,22 +367,27 @@ class EmulatorSession {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const session = new EmulatorSession(context);
-
   context.subscriptions.push(
     vscode.commands.registerCommand('vs-avd.openEmulatorViewer', async () => {
       const panel = vscode.window.createWebviewPanel(
         'androidEmulatorViewer',
         'Android Emulator Viewer',
         vscode.ViewColumn.Active,
-        { enableScripts: true }
+        {
+          enableScripts: true,
+          retainContextWhenHidden: true,
+          localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')]
+        }
       );
 
+      const session = new EmulatorSession(context);
       await session.open(panel);
+
+      // The panel is live and interactive at this point; the picker is only a
+      // convenience. Cancelling it leaves the viewer usable via its AVD field.
       const avd = await pickAvd();
       if (avd) {
-        await session.open(panel);
-        await session['start'](avd);
+        await session.start(avd);
       }
     })
   );
