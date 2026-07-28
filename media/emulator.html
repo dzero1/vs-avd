@@ -2,26 +2,147 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline' {{cspSource}}; script-src 'unsafe-inline' {{cspSource}}; connect-src {{cspSource}};" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: blob: https:; media-src blob:; style-src 'unsafe-inline' {{cspSource}}; script-src 'unsafe-inline' {{cspSource}}; connect-src {{cspSource}};" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="stylesheet" href="{{styleUri}}" />
     <title>Android Emulator Viewer</title>
   </head>
   <body>
-    <div class="toolbar">
-      <label>AVD <input id="avdName" type="text" placeholder="Pixel_7_API_35" /></label>
-      <button id="startBtn">Start</button>
-      <button id="stopBtn">Stop</button>
-      <button id="refreshBtn">Refresh</button>
-      <span id="status">Idle</span>
-    </div>
-    <div class="viewport-wrapper">
-      <canvas id="screen" width="720" height="1280"></canvas>
-    </div>
-    <div class="log-panel">
-      <div class="log-header">Live logs</div>
-      <pre id="logOutput"></pre>
-    </div>
+    <!-- Material Symbols are inlined as an SVG sprite: the webview CSP blocks
+         Google's icon-font CDN, so the glyphs have to ship with the extension. -->
+    <svg class="sprite" aria-hidden="true">
+      <defs>
+        <symbol id="ic-play" viewBox="0 -960 960 960">
+          <path d="M320-200v-560l440 280-440 280Z" />
+        </symbol>
+        <symbol id="ic-stop" viewBox="0 -960 960 960">
+          <path d="M240-240v-480h480v480H240Z" />
+        </symbol>
+        <symbol id="ic-refresh" viewBox="0 -960 960 960">
+          <path d="M480-160q-134 0-227-93t-93-227q0-134 93-227t227-93q69 0 132 28.5T720-690v-110h80v280H520v-80h168q-32-56-87.5-88T480-720q-100 0-170 70t-70 170q0 100 70 170t170 70q77 0 139-44t87-116h84q-28 106-114 173t-196 67Z" />
+        </symbol>
+        <symbol id="ic-fit-height" viewBox="0 -960 960 960">
+          <path d="M480-120 300-300l58-58 122 122 122-122 58 58-180 180ZM358-598l-58-58 180-180 180 180-58 58-122-122-122 122Z" />
+        </symbol>
+        <symbol id="ic-fit-width" viewBox="0 -960 960 960">
+          <path d="M120-480l180-180 58 58-122 122 122 122-58 58-180-180Zm542 180l-58-58 122-122-122-122 58-58 180 180-180 180Z" />
+        </symbol>
+        <symbol id="ic-zoom-in" viewBox="0 -960 960 960">
+          <path d="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400Zm-40-60v-80h-80v-80h80v-80h80v80h80v80h-80v80h-80Z" />
+        </symbol>
+        <symbol id="ic-zoom-out" viewBox="0 -960 960 960">
+          <path d="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400ZM260-540v-80h240v80H260Z" />
+        </symbol>
+        <symbol id="ic-back" viewBox="0 -960 960 960">
+          <path d="M400-80 0-480l400-400 71 71-329 329 329 329-71 71Z" />
+        </symbol>
+        <symbol id="ic-home" viewBox="0 -960 960 960">
+          <path d="M480-80q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Z" />
+        </symbol>
+        <symbol id="ic-recents" viewBox="0 -960 960 960">
+          <path d="M200-200v-560h560v560H200Zm80-80h400v-400H280v400Z" />
+        </symbol>
+        <symbol id="ic-logs" viewBox="0 -960 960 960">
+          <path d="M280-280h280v-80H280v80Zm0-160h400v-80H280v80Zm0-160h400v-80H280v80Zm-80 480q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm0-560v560-560Z" />
+        </symbol>
+        <symbol id="ic-phone" viewBox="0 -960 960 960">
+          <path d="M280-40q-33 0-56.5-23.5T200-120v-720q0-33 23.5-56.5T280-920h400q33 0 56.5 23.5T760-840v720q0 33-23.5 56.5T680-40H280Zm0-120v40h400v-40H280Zm0-80h400v-480H280v480Zm0-560h400v-40H280v40Zm0 0v-40 40Zm0 640v40-40Z" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <header class="toolbar">
+      <div class="toolbar__device">
+        <svg class="icon icon--device"><use href="#ic-phone" /></svg>
+        <select id="avdSelect" aria-label="Android Virtual Device"></select>
+      </div>
+
+      <div class="status" id="statusChip">
+        <span class="status__dot" id="statusDot"></span>
+        <span class="status__text" id="status">Idle</span>
+      </div>
+
+      <div class="toolbar__spacer"></div>
+
+      <div class="segmented" role="group" aria-label="View size">
+        <button id="fitHeightBtn" class="iconbtn" title="Fit to height">
+          <svg class="icon"><use href="#ic-fit-height" /></svg>
+        </button>
+        <button id="fitWidthBtn" class="iconbtn" title="Fit to width">
+          <svg class="icon"><use href="#ic-fit-width" /></svg>
+        </button>
+        <button id="zoomOutBtn" class="iconbtn" title="Zoom out">
+          <svg class="icon"><use href="#ic-zoom-out" /></svg>
+        </button>
+        <span class="zoomlabel" id="zoomLabel">Fit</span>
+        <button id="zoomInBtn" class="iconbtn" title="Zoom in">
+          <svg class="icon"><use href="#ic-zoom-in" /></svg>
+        </button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="segmented" role="group" aria-label="Hardware keys">
+        <button id="navBackBtn" class="iconbtn" title="Back">
+          <svg class="icon"><use href="#ic-back" /></svg>
+        </button>
+        <button id="navHomeBtn" class="iconbtn" title="Home">
+          <svg class="icon"><use href="#ic-home" /></svg>
+        </button>
+        <button id="navRecentsBtn" class="iconbtn" title="Recent apps">
+          <svg class="icon"><use href="#ic-recents" /></svg>
+        </button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="actions">
+        <button id="startBtn" class="iconbtn iconbtn--primary" title="Start emulator">
+          <svg class="icon"><use href="#ic-play" /></svg>
+        </button>
+        <button id="stopBtn" class="iconbtn iconbtn--danger" title="Stop emulator">
+          <svg class="icon"><use href="#ic-stop" /></svg>
+        </button>
+        <button id="refreshBtn" class="iconbtn" title="Refresh frame">
+          <svg class="icon"><use href="#ic-refresh" /></svg>
+        </button>
+        <button id="logsBtn" class="iconbtn" title="Open logs in Output panel">
+          <svg class="icon"><use href="#ic-logs" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- tabindex so the stage can take focus and receive key events -->
+    <main class="stage" id="stage" tabindex="0">
+      <div class="screen-frame" id="screenFrame">
+        <canvas id="screen" width="1080" height="2340"></canvas>
+      </div>
+      <div class="placeholder" id="placeholder">
+        <svg class="placeholder__icon"><use href="#ic-phone" /></svg>
+        <p class="placeholder__title" id="placeholderTitle">No emulator running</p>
+        <p class="placeholder__hint" id="placeholderHint">Pick an AVD and press start.</p>
+      </div>
+
+      <!-- Boot progress. Phases come from the extension as they actually happen,
+           so this reflects real milestones rather than a timed animation. -->
+      <div class="loader" id="loader" role="status" aria-live="polite">
+        <div class="loader__phone">
+          <svg class="loader__icon"><use href="#ic-phone" /></svg>
+          <div class="loader__sweep"></div>
+        </div>
+        <p class="loader__title" id="loaderTitle">Starting emulator…</p>
+        <div class="loader__track"><div class="loader__fill" id="loaderFill"></div></div>
+        <ol class="steps" id="loaderSteps">
+          <li data-phase="starting">Launching emulator</li>
+          <li data-phase="connected">Connecting over adb</li>
+          <li data-phase="shell">Waiting for shell</li>
+          <li data-phase="booting">Booting Android</li>
+          <li data-phase="streaming">Starting stream</li>
+        </ol>
+        <p class="loader__elapsed" id="loaderElapsed"></p>
+      </div>
+    </main>
+
     <script src="{{scriptUri}}"></script>
   </body>
 </html>
