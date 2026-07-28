@@ -5,7 +5,11 @@
       "Bash(scrcpy --version)",
       "Bash(~/Library/Android/sdk/emulator/emulator -list-avds)",
       "Bash(~/Library/Android/sdk/platform-tools/adb devices *)",
-      "Bash(node --input-type=module -e ' *)"
+      "Bash(node --input-type=module -e ' *)",
+      "Bash(npm install *)",
+      "Bash(node uitest.tmp.js)",
+      "Bash(npm uninstall *)",
+      "Bash(node verify.tmp.js)"
     ]
   }
 }

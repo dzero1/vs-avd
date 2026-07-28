@@ -57,6 +57,7 @@ class EmulatorSession {
   private async handleMessage(message: any): Promise<void> {
     switch (message.type) {
       case 'ready':
+        await this.sendAvdList();
         this.setState(this.state);
         break;
       case 'start':
@@ -71,6 +72,14 @@ class EmulatorSession {
       case 'refresh':
         await this.captureFrame();
         break;
+      case 'showLogs':
+        this.outputChannel.show(true);
+        break;
+      case 'requestKeyframe':
+        // screenrecord only emits an IDR when a segment starts, so the only way
+        // to force one is to restart the capture.
+        this.restartVideoStream();
+        break;
       default:
         break;
     }
@@ -84,10 +93,12 @@ class EmulatorSession {
     }
 
     this.avdName = avdName;
+    if (this.panel) {
+      this.panel.title = avdName;
+    }
     this.setState('BOOTING_EMULATOR');
     this.log(`Starting emulator for AVD: ${avdName}`);
-    this.outputChannel.show(true);
-    this.sendToWebview({ type: 'status', message: `Launching ${avdName}...` });
+    this.sendToWebview({ type: 'status', message: `Launching ${avdName}…`, kind: 'busy' });
 
     try {
       this.emulatorProcess = cp.spawn('emulator', [
@@ -123,7 +134,7 @@ class EmulatorSession {
       this.screenSize = await this.detectScreenSize();
       this.setState('STREAMING');
       this.log('Emulator finished booting and streaming has started.');
-      this.sendToWebview({ type: 'status', message: 'Emulator is ready. Streaming H.264.' });
+      this.sendToWebview({ type: 'status', message: `Streaming ${this.avdName}`, kind: 'live' });
       this.startVideoStream();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -157,6 +168,30 @@ class EmulatorSession {
     }
 
     throw new Error('Timed out waiting for the Android emulator to finish booting.');
+  }
+
+  // The webview owns AVD selection, so the list is pushed to it on ready
+  // instead of going through a modal QuickPick.
+  private async sendAvdList(): Promise<void> {
+    try {
+      const result = await runCommand('emulator', ['-list-avds']);
+      const avds = result.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      this.log(avds.length ? `Found AVDs: ${avds.join(', ')}` : 'No AVDs found.');
+      this.sendToWebview({ type: 'avdList', avds });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Unable to list AVDs: ${message}`);
+      this.sendToWebview({ type: 'avdList', avds: [] });
+      this.sendToWebview({
+        type: 'status',
+        message: 'emulator CLI not found on PATH',
+        kind: 'error'
+      });
+    }
   }
 
   private async detectScreenSize(): Promise<{ width: number; height: number } | undefined> {
@@ -221,7 +256,7 @@ class EmulatorSession {
 
       child.on('error', (error) => {
         this.log(`Video stream failed: ${error.message}`);
-        this.sendToWebview({ type: 'status', message: `Video stream failed: ${error.message}` });
+        this.sendToWebview({ type: 'status', message: `Video stream failed: ${error.message}`, kind: 'error' });
       });
 
       child.on('close', (code) => {
@@ -247,6 +282,18 @@ class EmulatorSession {
     this.streamProcess = undefined;
   }
 
+  // Forces a fresh SPS/PPS + IDR by starting a new capture segment. Used when
+  // the webview reports it is stuck without a decodable keyframe.
+  private restartVideoStream(): void {
+    if (this.state !== 'STREAMING') {
+      return;
+    }
+    this.log('Restarting video stream to obtain a keyframe.');
+    this.stopVideoStream();
+    this.sendToWebview({ type: 'videoReset' });
+    this.startVideoStream();
+  }
+
   private async captureFrame(): Promise<void> {
     try {
       const imageBuffer = await this.runAdbBuffer(['exec-out', 'screencap', '-p']);
@@ -254,7 +301,7 @@ class EmulatorSession {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`Screenshot capture failed: ${message}`);
-      this.sendToWebview({ type: 'status', message: `Screenshot refresh failed: ${message}` });
+      this.sendToWebview({ type: 'status', message: `Screenshot refresh failed: ${message}`, kind: 'error' });
     }
   }
 
@@ -287,9 +334,10 @@ class EmulatorSession {
       this.emulatorProcess.kill();
     }
     this.emulatorProcess = undefined;
+    this.screenSize = undefined;
     this.setState('STOPPED');
     this.log('Session stopped.');
-    this.sendToWebview({ type: 'status', message: 'Emulator stopped.' });
+    this.sendToWebview({ type: 'status', message: 'Stopped' });
   }
 
   private setState(nextState: SessionState): void {
@@ -304,9 +352,7 @@ class EmulatorSession {
 
   private log(message: string): void {
     const timestamp = new Date().toLocaleTimeString();
-    const entry = `[${timestamp}] ${message}`;
-    this.outputChannel.appendLine(entry);
-    this.sendToWebview({ type: 'log', message: entry });
+    this.outputChannel.appendLine(`[${timestamp}] ${message}`);
   }
 
   private delay(ms: number): Promise<void> {
@@ -380,43 +426,16 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       );
 
+      // The webview requests the AVD list itself once its script is ready, and
+      // drives start/stop from its own toolbar.
       const session = new EmulatorSession(context);
       await session.open(panel);
-
-      // The panel is live and interactive at this point; the picker is only a
-      // convenience. Cancelling it leaves the viewer usable via its AVD field.
-      const avd = await pickAvd();
-      if (avd) {
-        await session.start(avd);
-      }
     })
   );
 }
 
 export function deactivate(): void {
   // no-op
-}
-
-async function pickAvd(): Promise<string | undefined> {
-  try {
-    const result = await runCommand('emulator', ['-list-avds']);
-    const avds = result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (avds.length === 0) {
-      vscode.window.showWarningMessage('No Android virtual devices were found. Create one in Android Studio or install the emulator first.');
-      return undefined;
-    }
-
-    return await vscode.window.showQuickPick(avds, {
-      placeHolder: 'Choose an Android Virtual Device'
-    });
-  } catch {
-    vscode.window.showWarningMessage('The emulator CLI is not available on PATH. Install Android Studio or the Android SDK platform tools first.');
-    return undefined;
-  }
 }
 
 function runCommand(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
