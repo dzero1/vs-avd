@@ -1,0 +1,51 @@
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background: #111;
+  color: #fff;
+}
+.toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  align-items: center;
+  background: #222;
+}
+.viewport-wrapper {
+  padding: 12px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: auto;
+}
+canvas {
+  border: 1px solid #444;
+  background: #000;
+  max-width: 100%;
+}
+.log-panel {
+  margin: 0 12px 12px;
+  border: 1px solid #444;
+  background: #1a1a1a;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.log-header {
+  background: #2a2a2a;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#logOutput {
+  margin: 0;
+  padding: 10px;
+  min-height: 140px;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

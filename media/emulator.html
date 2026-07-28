@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline' {{cspSource}}; script-src 'unsafe-inline' {{cspSource}}; connect-src {{cspSource}};" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="{{styleUri}}" />
+    <title>Android Emulator Viewer</title>
+  </head>
+  <body>
+    <div class="toolbar">
+      <label>AVD <input id="avdName" type="text" placeholder="Pixel_7_API_35" /></label>
+      <button id="startBtn">Start</button>
+      <button id="stopBtn">Stop</button>
+      <button id="refreshBtn">Refresh</button>
+      <span id="status">Idle</span>
+    </div>
+    <div class="viewport-wrapper">
+      <canvas id="screen" width="720" height="1280"></canvas>
+    </div>
+    <div class="log-panel">
+      <div class="log-header">Live logs</div>
+      <pre id="logOutput"></pre>
+    </div>
+    <script src="{{scriptUri}}"></script>
+  </body>
+</html>
