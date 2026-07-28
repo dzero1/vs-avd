@@ -4,15 +4,31 @@
   "description": "View and interact with Android AVDs from inside VS Code",
   "version": "0.0.1",
   "publisher": "devloop",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dzero1/vs-avd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dzero1/vs-avd/issues"
+  },
+  "homepage": "https://github.com/dzero1/vs-avd#readme",
   "engines": {
     "vscode": "^1.92.0"
   },
   "categories": [
+    "Debuggers",
+    "Visualization",
     "Other"
   ],
-  "activationEvents": [
-    "onCommand:vs-avd.openEmulatorViewer"
+  "keywords": [
+    "android",
+    "emulator",
+    "avd",
+    "adb",
+    "scrcpy"
   ],
+  "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
