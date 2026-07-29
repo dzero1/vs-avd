@@ -3,6 +3,7 @@ const vscode = acquireVsCodeApi();
 const canvas = document.getElementById('screen');
 const ctx = canvas.getContext('2d');
 const stage = document.getElementById('stage');
+const screenFrame = document.getElementById('screenFrame');
 const statusEl = document.getElementById('status');
 const statusChip = document.getElementById('statusChip');
 const avdSelect = document.getElementById('avdSelect');
@@ -244,13 +245,22 @@ function base64ToBytes(base64) {
 const ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 3];
 let viewMode = 'fitHeight';
 
+// Space actually available to the canvas: the stage's own padding plus the
+// frame's transparent spacing border, which sits between the stage edge and the
+// canvas. Missing the border made a fit overshoot by its two sides (36px) and
+// leave the view permanently scrollable.
 function stageBox() {
   const style = getComputedStyle(stage);
   const padX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
   const padY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+
+  const frameStyle = getComputedStyle(screenFrame);
+  const borderX = parseFloat(frameStyle.borderLeftWidth) + parseFloat(frameStyle.borderRightWidth);
+  const borderY = parseFloat(frameStyle.borderTopWidth) + parseFloat(frameStyle.borderBottomWidth);
+
   return {
-    width: Math.max(40, stage.clientWidth - padX),
-    height: Math.max(40, stage.clientHeight - padY)
+    width: Math.max(40, stage.clientWidth - padX - borderX),
+    height: Math.max(40, stage.clientHeight - padY - borderY)
   };
 }
 
