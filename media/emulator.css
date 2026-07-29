@@ -238,7 +238,9 @@ select#avdSelect:disabled {
   overflow: auto;
   display: grid;
   place-items: center;
-  padding: 18px;
+  /* Extra clearance at the top so a zoomed-in screen scrolled to its very top
+     still sits clear of the toolbar rather than touching it. */
+  padding: 28px 18px 18px;
   background:
     radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--vscode-foreground) 5%, transparent), transparent 60%),
     var(--surface);
@@ -255,6 +257,12 @@ select#avdSelect:disabled {
 
 .stage--live .screen-frame {
   display: block;
+  /* Auto margins centre the screen while it fits, but unlike `place-items:
+     center` they resolve to zero once it overflows, so a zoomed-in screen scrolls
+     from its true top-left instead of being centred to a negative offset the
+     scrollport can never reach. The grid's own centring is left alone so the
+     loader and placeholder stay put. */
+  margin: auto;
 }
 
 .stage--live .placeholder {
