@@ -38,6 +38,9 @@ const loaderElapsed = document.getElementById('loaderElapsed');
 function setStatus(text, kind) {
   statusEl.textContent = text;
   statusChip.className = `status${kind ? ` status--${kind}` : ''}`;
+  // On a narrow panel the chip collapses to its dot, so the text has to survive
+  // as a tooltip or the status becomes unreadable.
+  statusChip.title = text;
 }
 
 // --- H.264 decoding -------------------------------------------------------

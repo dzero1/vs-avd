@@ -33,8 +33,11 @@
         <symbol id="ic-zoom-out" viewBox="0 -960 960 960">
           <path d="M784-120 532-372q-30 24-69 38t-83 14q-109 0-184.5-75.5T120-580q0-109 75.5-184.5T380-840q109 0 184.5 75.5T640-580q0 44-14 83t-38 69l252 252-56 56ZM380-400q75 0 127.5-52.5T560-580q0-75-52.5-127.5T380-760q-75 0-127.5 52.5T200-580q0 75 52.5 127.5T380-400ZM260-540v-80h240v80H260Z" />
         </symbol>
+        <!-- Chevron centred on (480,-480) so the ink sits square in the button;
+             the stock Material arrow is flush-left in its viewBox and reads as
+             visibly off-centre next to the other glyphs. -->
         <symbol id="ic-back" viewBox="0 -960 960 960">
-          <path d="M400-80 0-480l400-400 71 71-329 329 329 329-71 71Z" />
+          <path d="M636-116 272-480l364-364 71 71-293 293 293 293-71 71Z" />
         </symbol>
         <symbol id="ic-home" viewBox="0 -960 960 960">
           <path d="M480-80q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Z" />
@@ -119,20 +122,6 @@
 
       <div class="divider"></div>
 
-      <div class="segmented" role="group" aria-label="Hardware keys">
-        <button id="navBackBtn" class="iconbtn" title="Back">
-          <svg class="icon"><use href="#ic-back" /></svg>
-        </button>
-        <button id="navHomeBtn" class="iconbtn" title="Home">
-          <svg class="icon"><use href="#ic-home" /></svg>
-        </button>
-        <button id="navRecentsBtn" class="iconbtn" title="Recent apps">
-          <svg class="icon"><use href="#ic-recents" /></svg>
-        </button>
-      </div>
-
-      <div class="divider"></div>
-
       <div class="actions">
         <button id="startBtn" class="iconbtn iconbtn--primary" title="Start emulator">
           <svg class="icon"><use href="#ic-play" /></svg>
@@ -196,6 +185,19 @@
         </button>
         <button id="extendedBtn" class="toolbtn" title="Extended controls" aria-expanded="false">
           <svg class="icon"><use href="#ic-tune" /></svg>
+        </button>
+
+        <!-- Hardware keys live here rather than in the toolbar: they act on the
+             screen, and keeping them off the bar is what stops it overflowing. -->
+        <div class="tools__sep" role="separator"></div>
+        <button id="navBackBtn" class="toolbtn" title="Back">
+          <svg class="icon"><use href="#ic-back" /></svg>
+        </button>
+        <button id="navHomeBtn" class="toolbtn" title="Home">
+          <svg class="icon"><use href="#ic-home" /></svg>
+        </button>
+        <button id="navRecentsBtn" class="toolbtn" title="Recent apps">
+          <svg class="icon"><use href="#ic-recents" /></svg>
         </button>
       </div>
 

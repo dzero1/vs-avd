@@ -42,14 +42,21 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+/* The spacer is the first thing to give up room, so the controls stay put and
+   the flexible items either side absorb the squeeze. */
 .toolbar__spacer {
   flex: 1 1 auto;
+  min-width: 0;
 }
 
+/* min-width:0 lets these shrink below their content width — without it a flex
+   item refuses to go under its intrinsic size and pushes the buttons out of
+   the bar instead of letting the text ellipsize. */
 .toolbar__device {
   display: flex;
   align-items: center;
   gap: 7px;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -67,6 +74,7 @@ body {
 
 select#avdSelect {
   appearance: none;
+  min-width: 0;
   max-width: 220px;
   padding: 5px 26px 5px 9px;
   border-radius: 6px;
@@ -106,7 +114,13 @@ select#avdSelect:disabled {
   color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
+  /* Shrinkable down to just the dot: the status is the least important thing on
+     the bar, so it yields space before any control does. It overlapped the
+     buttons previously because it could not shrink at all. */
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 340px;
+  overflow: hidden;
 }
 
 .status__text {
@@ -484,6 +498,14 @@ canvas#screen.dragging {
   cursor: grabbing;
 }
 
+/* Divides the view/rotate tools from the hardware keys below them. */
+.tools__sep {
+  width: 18px;
+  height: 1px;
+  margin: 3px 0;
+  background: color-mix(in srgb, var(--vscode-foreground) 20%, transparent);
+}
+
 .toolbtn {
   display: inline-flex;
   align-items: center;
@@ -721,5 +743,72 @@ canvas#screen.dragging {
 @media (max-width: 560px) {
   .ext {
     width: 100%;
+  }
+}
+
+/* ---------- toolbar responsiveness ---------- */
+/* The bar sheds width in stages instead of overflowing: tighten spacing, then
+   shrink the AVD name, then drop the status text down to just its dot. Nothing
+   is ever hidden that cannot be reached another way — the zoom label goes last
+   because the fit/zoom buttons still convey the same state. */
+
+@media (max-width: 720px) {
+  .toolbar {
+    gap: 6px;
+    padding: 8px 8px;
+  }
+
+  select#avdSelect {
+    max-width: 150px;
+  }
+
+  .zoomlabel {
+    min-width: 36px;
+  }
+}
+
+@media (max-width: 560px) {
+  select#avdSelect {
+    max-width: 104px;
+    padding-right: 22px;
+  }
+
+  /* The phone glyph is decorative next to a labelled dropdown. */
+  .icon--device {
+    display: none;
+  }
+
+  .iconbtn {
+    width: 26px;
+  }
+
+  .icon {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+@media (max-width: 440px) {
+  .toolbar {
+    gap: 4px;
+  }
+
+  /* Collapse the status to its coloured dot: the dot alone still says
+     idle/busy/live/error, and the full text stays available in the tooltip. */
+  .status {
+    padding: 4px;
+    max-width: none;
+  }
+
+  .status__text {
+    display: none;
+  }
+
+  .zoomlabel {
+    display: none;
+  }
+
+  .divider {
+    display: none;
   }
 }

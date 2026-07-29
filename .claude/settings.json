@@ -28,7 +28,18 @@
       "Bash(timeout 12 adb exec-out screenrecord --output-format=h264 --time-limit=8 --bit-rate=2000000 -)",
       "Bash(xargs -I{} echo \"  accelerometer_rotation={}\")",
       "Bash(xargs -I{} echo \"  user_rotation={}\")",
-      "Bash(echo \"TSC EXIT=$?\")"
+      "Bash(echo \"TSC EXIT=$?\")",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=4000 --dump-dom /tmp/tbtest/m.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=4000 --dump-dom /tmp/tbtest/m_old.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 --screenshot=/tmp/tbtest/toolbar.png --window-size=960,340 /tmp/tbtest/shot.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 --screenshot=/tmp/tbtest/toolbar2.png --window-size=940,310 /tmp/tbtest/shot2.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 --dump-dom /tmp/tbtest/diag.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=1500 --window-size=360,60 --dump-dom /tmp/tbtest/q.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=3000 --screenshot=/tmp/tbtest/final.png --window-size=620,400 /tmp/tbtest/final.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=2500 --screenshot=/tmp/tbtest/panel.png --window-size=500,215 /tmp/tbtest/panel.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=2500 --screenshot=/tmp/tbtest/panel2.png --window-size=500,400 /tmp/tbtest/panel.html)",
+      "Bash(sed -i '' 's/height:210px/height:390px/' /tmp/tbtest/panel.html)",
+      "Bash(\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\" --headless --disable-gpu --no-sandbox --virtual-time-budget=2500 --screenshot=/tmp/tbtest/panel3.png --window-size=500,400 /tmp/tbtest/panel.html)"
     ]
   }
 }
