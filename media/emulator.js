@@ -558,6 +558,10 @@ canvas.addEventListener(
   'wheel',
   (event) => {
     event.preventDefault();
+    // A wheel turn mid-drag would inject a separate swipe into the gesture that
+    // is already in flight, so scrolling is ignored while a press is held. This
+    // also covers a middle-button press that emits wheel events of its own.
+    if (pointer) return;
     const at = normalize(event);
     // deltaMode 1 is lines, 2 is pages; normalize everything to rough pixels.
     const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
@@ -572,6 +576,9 @@ canvas.addEventListener(
       const { dx, dy, nx, ny } = wheelAccum;
       wheelAccum = { dx: 0, dy: 0, nx, ny };
       if (dx === 0 && dy === 0) return;
+      // A scroll must never reach the device as a tap. Anything below this is
+      // scaled up on the extension side to clear the platform's tap slop.
+      if (Math.hypot(dx, dy) < 1) return;
       // Scale up: a wheel notch should move more than its pixel delta suggests.
       vscode.postMessage({ type: 'scroll', nx, ny, dx: dx * 2.5, dy: dy * 2.5 });
     }, 60);

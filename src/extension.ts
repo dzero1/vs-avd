@@ -18,6 +18,12 @@ const BOOT_TIMEOUT_MS = 180_000;
 // device: 400ms fires the long press, 300ms does not.
 const LONG_PRESS_MIN_MS = 400;
 
+// A swipe shorter than the platform's tap slop is indistinguishable from a tap,
+// so the device treats it as a click. `dumpsys input` reports TapSlop: 20.0px;
+// measured on device, a 20px swipe still clicks and 25px does not. Scroll travel
+// is raised to clear that boundary rather than being sent as a stray tap.
+const MIN_SCROLL_TRAVEL_PX = 26;
+
 const STREAM_SEGMENT_SECONDS = 170;
 const STREAM_BITRATE = 8_000_000;
 
@@ -864,10 +870,34 @@ class EmulatorSession {
     // Clamp against the visible space, since that is what the coordinates are in.
     const size = this.visibleSize();
     // A wheel notch moves the content, so the finger travels the opposite way.
-    const travelX = Math.round(Math.min(Math.max(-dx, -size.width), size.width));
-    const travelY = Math.round(Math.min(Math.max(-dy, -size.height), size.height));
+    let travelX = Math.round(Math.min(Math.max(-dx, -size.width), size.width));
+    let travelY = Math.round(Math.min(Math.max(-dy, -size.height), size.height));
+
+    // One slow wheel notch is only a few pixels of delta, which produced a swipe
+    // shorter than the tap slop — the device then read it as a click and
+    // activated whatever was under the cursor. Scale the travel up to clear the
+    // slop while keeping its direction, so a slow scroll scrolls a little
+    // instead of tapping.
+    const distance = Math.hypot(travelX, travelY);
+    if (distance === 0) {
+      return;
+    }
+    if (distance < MIN_SCROLL_TRAVEL_PX) {
+      const scale = MIN_SCROLL_TRAVEL_PX / distance;
+      travelX = Math.round(travelX * scale);
+      travelY = Math.round(travelY * scale);
+    }
+
     const endX = Math.min(Math.max(x + travelX, 0), size.width);
     const endY = Math.min(Math.max(y + travelY, 0), size.height);
+
+    // Clamping at an edge can pull the end point back inside the slop radius, so
+    // a scroll that cannot travel far enough is dropped rather than sent as a tap.
+    if (Math.hypot(endX - x, endY - y) < MIN_SCROLL_TRAVEL_PX) {
+      this.log(`scroll at (${x}, ${y}) ignored: too close to the edge to clear tap slop`);
+      return;
+    }
+
     this.log(`scroll at (${x}, ${y}) by (${travelX}, ${travelY})`);
     this.sendInput([`input swipe ${x} ${y} ${endX} ${endY} 80`]);
   }
