@@ -18,6 +18,14 @@ const fitWidthBtn = document.getElementById('fitWidthBtn');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
 const zoomLabel = document.getElementById('zoomLabel');
+const tools = document.getElementById('tools');
+const toolsGrip = document.getElementById('toolsGrip');
+const shotBtn = document.getElementById('shotBtn');
+const rotateLeftBtn = document.getElementById('rotateLeftBtn');
+const rotateRightBtn = document.getElementById('rotateRightBtn');
+const extendedBtn = document.getElementById('extendedBtn');
+const ext = document.getElementById('ext');
+const extCloseBtn = document.getElementById('extCloseBtn');
 const placeholderTitle = document.getElementById('placeholderTitle');
 const placeholderHint = document.getElementById('placeholderHint');
 const loaderTitle = document.getElementById('loaderTitle');
@@ -30,6 +38,9 @@ const loaderElapsed = document.getElementById('loaderElapsed');
 function setStatus(text, kind) {
   statusEl.textContent = text;
   statusChip.className = `status${kind ? ` status--${kind}` : ''}`;
+  // On a narrow panel the chip collapses to its dot, so the text has to survive
+  // as a tooltip or the status becomes unreadable.
+  statusChip.title = text;
 }
 
 // --- H.264 decoding -------------------------------------------------------
@@ -603,6 +614,247 @@ stage.addEventListener('keydown', (event) => {
 // The stage needs focus to receive keys; clicking the screen gives it focus.
 canvas.addEventListener('pointerdown', () => stage.focus());
 
+// --- floating tool panel --------------------------------------------------
+
+// Confirms a fire-and-forget action (screenshot, rotate) visually, since those
+// leave no lasting state on the button.
+function flash(button) {
+  button.classList.add('is-flash');
+  setTimeout(() => button.classList.remove('is-flash'), 220);
+}
+
+shotBtn.addEventListener('click', () => {
+  flash(shotBtn);
+  vscode.postMessage({ type: 'screenshot' });
+});
+
+// Rotation is debounced: each rotate restarts the video segment, and stacking
+// them mid-restart leaves the stream and the reported size out of sync.
+let rotateLock = false;
+
+function rotate(direction, button) {
+  if (rotateLock) return;
+  rotateLock = true;
+  flash(button);
+  vscode.postMessage({ type: 'rotate', direction });
+  setTimeout(() => {
+    rotateLock = false;
+  }, 900);
+}
+
+rotateLeftBtn.addEventListener('click', () => rotate('left', rotateLeftBtn));
+rotateRightBtn.addEventListener('click', () => rotate('right', rotateRightBtn));
+
+// Drag the panel by its grip. Positions are clamped to the window so it can
+// never be dropped somewhere unreachable.
+let toolsDrag;
+
+toolsGrip.addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  const rect = tools.getBoundingClientRect();
+  toolsDrag = {
+    offsetX: event.clientX - rect.left,
+    offsetY: event.clientY - rect.top,
+    width: rect.width,
+    height: rect.height
+  };
+  tools.classList.add('is-dragging');
+  toolsGrip.setPointerCapture(event.pointerId);
+  event.preventDefault();
+});
+
+toolsGrip.addEventListener('pointermove', (event) => {
+  if (!toolsDrag) return;
+  const maxLeft = Math.max(0, window.innerWidth - toolsDrag.width);
+  const maxTop = Math.max(0, window.innerHeight - toolsDrag.height);
+  const left = Math.min(Math.max(event.clientX - toolsDrag.offsetX, 0), maxLeft);
+  const top = Math.min(Math.max(event.clientY - toolsDrag.offsetY, 0), maxTop);
+  tools.style.left = `${Math.round(left)}px`;
+  tools.style.top = `${Math.round(top)}px`;
+});
+
+function endToolsDrag(event) {
+  if (!toolsDrag) return;
+  toolsDrag = undefined;
+  tools.classList.remove('is-dragging');
+  if (toolsGrip.hasPointerCapture?.(event.pointerId)) {
+    toolsGrip.releasePointerCapture(event.pointerId);
+  }
+}
+
+toolsGrip.addEventListener('pointerup', endToolsDrag);
+toolsGrip.addEventListener('pointercancel', endToolsDrag);
+
+// The panel floats over the screen, so clicks on it must not reach the canvas
+// underneath and register as taps on the device.
+for (const element of [tools, ext]) {
+  element.addEventListener('pointerdown', (event) => event.stopPropagation());
+  element.addEventListener('wheel', (event) => event.stopPropagation());
+}
+
+// --- extended controls ----------------------------------------------------
+
+function setExtOpen(open) {
+  ext.classList.toggle('is-open', open);
+  ext.setAttribute('aria-hidden', String(!open));
+  extendedBtn.classList.toggle('toolbtn--on', open);
+  extendedBtn.setAttribute('aria-expanded', String(open));
+}
+
+extendedBtn.addEventListener('click', () => setExtOpen(!ext.classList.contains('is-open')));
+extCloseBtn.addEventListener('click', () => setExtOpen(false));
+
+// Escape closes the drawer. Captured on the window because the stage's own
+// keydown handler forwards Escape to the device as KEYCODE_BACK.
+window.addEventListener(
+  'keydown',
+  (event) => {
+    if (event.key === 'Escape' && ext.classList.contains('is-open')) {
+      setExtOpen(false);
+      event.stopPropagation();
+      event.preventDefault();
+    }
+  },
+  true
+);
+
+// Console commands go out through the extension, which validates every argument
+// before it reaches a process.
+function emu(args, label, freeText) {
+  vscode.postMessage({ type: 'emu', args, label, freeText });
+}
+
+// -- battery
+const battLevel = document.getElementById('battLevel');
+const battLevelOut = document.getElementById('battLevelOut');
+const battStatus = document.getElementById('battStatus');
+const battHealth = document.getElementById('battHealth');
+
+// The slider fires continuously while dragging, so the label updates live but
+// the console call waits for the release ('change').
+battLevel.addEventListener('input', () => {
+  battLevelOut.textContent = `${battLevel.value}%`;
+});
+battLevel.addEventListener('change', () => {
+  emu(['power', 'capacity', battLevel.value], `Battery ${battLevel.value}%`);
+});
+
+battStatus.addEventListener('change', () => {
+  // `power ac on|off` drives the charger icon; `power status` sets what the
+  // battery service reports, and the two have to agree.
+  const value = battStatus.value;
+  emu(['power', 'ac', value === 'none' ? 'off' : 'on'], 'Charger');
+  emu(['power', 'status', value === 'none' ? 'not-charging' : 'charging'], 'Charger');
+});
+
+battHealth.addEventListener('change', () => {
+  emu(['power', 'health', battHealth.value], 'Battery health');
+});
+
+// -- cellular
+const netType = document.getElementById('netType');
+const netStatus = document.getElementById('netStatus');
+const netSignal = document.getElementById('netSignal');
+const netSignalOut = document.getElementById('netSignalOut');
+
+const SIGNAL_LABELS = ['None', 'Poor', 'Moderate', 'Good', 'Great'];
+
+netType.addEventListener('change', () => {
+  emu(['network', 'speed', netType.value], 'Network type');
+});
+
+netStatus.addEventListener('change', () => {
+  // The console needs an explicit register: a bare `gsm <state>` is rejected as
+  // a bad sub-command. Voice and data are set together so the status the panel
+  // reports matches both.
+  emu(['gsm', 'voice', netStatus.value], 'Voice status');
+  emu(['gsm', 'data', netStatus.value], 'Data status');
+});
+
+netSignal.addEventListener('input', () => {
+  netSignalOut.textContent = SIGNAL_LABELS[Number(netSignal.value)];
+});
+netSignal.addEventListener('change', () => {
+  // gsm signal-profile takes 0-4, matching the slider directly.
+  emu(['gsm', 'signal-profile', netSignal.value], 'Signal strength');
+});
+
+// -- location
+const locLat = document.getElementById('locLat');
+const locLng = document.getElementById('locLng');
+const locAlt = document.getElementById('locAlt');
+const locSendBtn = document.getElementById('locSendBtn');
+
+// Console arguments are restricted to a strict alphabet upstream, so
+// coordinates are validated here to give a useful message instead of a
+// silent drop.
+function numberField(input, min, max) {
+  const value = Number(input.value.trim());
+  const ok = Number.isFinite(value) && value >= min && value <= max;
+  input.setCustomValidity(ok ? '' : `Enter a number between ${min} and ${max}`);
+  return ok ? value : undefined;
+}
+
+locSendBtn.addEventListener('click', () => {
+  const lat = numberField(locLat, -90, 90);
+  const lng = numberField(locLng, -180, 180);
+  const alt = numberField(locAlt, -500, 10000);
+  if (lat === undefined || lng === undefined || alt === undefined) {
+    setStatus('Enter a valid latitude, longitude and altitude', 'error');
+    return;
+  }
+  // `geo fix` takes longitude first.
+  emu(['geo', 'fix', String(lng), String(lat), String(alt)], 'Location');
+});
+
+// -- phone
+const phoneNumber = document.getElementById('phoneNumber');
+const smsBody = document.getElementById('smsBody');
+const callBtn = document.getElementById('callBtn');
+const callEndBtn = document.getElementById('callEndBtn');
+const smsBtn = document.getElementById('smsBtn');
+
+function phoneField() {
+  const value = phoneNumber.value.trim();
+  const ok = /^[+\d][\d]{1,19}$/.test(value);
+  phoneNumber.setCustomValidity(ok ? '' : 'Enter a phone number (digits, optional leading +)');
+  if (!ok) setStatus('Enter a valid phone number', 'error');
+  return ok ? value : undefined;
+}
+
+callBtn.addEventListener('click', () => {
+  const number = phoneField();
+  if (number) emu(['gsm', 'call', number], 'Incoming call');
+});
+
+callEndBtn.addEventListener('click', () => {
+  const number = phoneField();
+  if (number) emu(['gsm', 'cancel', number], 'End call');
+});
+
+smsBtn.addEventListener('click', () => {
+  const number = phoneField();
+  if (!number) return;
+  const body = smsBody.value.trim();
+  if (!body) {
+    setStatus('Enter a message to send', 'error');
+    return;
+  }
+  // The body goes as free text; the extension appends it as a single trailing
+  // argument so spaces and punctuation survive intact.
+  emu(['sms', 'send', number], 'SMS', body);
+});
+
+// -- fingerprint
+const fingerId = document.getElementById('fingerId');
+const fingerTouchBtn = document.getElementById('fingerTouchBtn');
+
+fingerTouchBtn.addEventListener('click', () => {
+  emu(['finger', 'touch', fingerId.value], 'Fingerprint');
+  // The sensor expects a release, otherwise the finger reads as still held.
+  setTimeout(() => emu(['finger', 'remove'], 'Fingerprint'), 350);
+});
+
 // --- extension messages ---------------------------------------------------
 
 const LIVE_STATES = new Set(['STREAMING']);
@@ -622,6 +874,18 @@ function applyState(state) {
   for (const button of [navBackBtn, navHomeBtn, navRecentsBtn]) {
     button.disabled = !live;
   }
+
+  // Every tool acts on a running device, so the whole panel and drawer go
+  // inert together; the drawer also closes so it isn't left over a dead screen.
+  for (const button of [shotBtn, rotateLeftBtn, rotateRightBtn, extendedBtn]) {
+    button.disabled = !live;
+  }
+  // The close button is excluded: disabling it would trap an open drawer.
+  for (const control of ext.querySelectorAll('.ext__body input, .ext__body select, .ext__body button')) {
+    control.disabled = !live;
+  }
+  if (!live) setExtOpen(false);
+
   if (live) stage.focus();
 
   if (live) setStatus('Streaming', 'live');
@@ -650,6 +914,13 @@ window.addEventListener('message', (event) => {
       break;
     case 'videoReset':
       resetDecoder();
+      break;
+    case 'rotation':
+      // A landscape stream is wider than it is tall, so a height-fit view would
+      // leave it tiny; switch the fit axis to match the new aspect.
+      if (viewMode === 'fitHeight' || viewMode === 'fitWidth') {
+        setViewMode(message.rotation === 1 || message.rotation === 3 ? 'fitWidth' : 'fitHeight');
+      }
       break;
     case 'video':
       if (message.data) onVideoBytes(base64ToBytes(message.data));
