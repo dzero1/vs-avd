@@ -1,0 +1,30 @@
+.vscode/**
+.vscode-test/**
+.claude/**
+.github/**
+
+# Sources — only compiled output in out/ ships
+src/**
+**/*.ts
+**/*.map
+out/**/*.map
+tsconfig.json
+
+# Dev dependencies and lockfiles
+node_modules/**
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# VCS and OS cruft
+.git/**
+.gitignore
+.gitattributes
+**/.DS_Store
+
+# Build artifacts — never nest a vsix inside the vsix
+*.vsix
+
+# Repo docs and demo assets — served over HTTP from GitHub, not bundled
+CONTRIBUTING.md
+demo/**
