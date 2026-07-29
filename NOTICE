@@ -1,0 +1,17 @@
+Third-party assets bundled with this extension
+==============================================
+
+media/icon.png
+--------------
+Android icon created by Magnific — Flaticon.
+https://www.flaticon.com/free-icons/android
+
+Used under the Flaticon Free License, which requires attribution to the author.
+Resized from the original 512x512 PNG to 128x128 for use as the extension icon;
+otherwise unmodified.
+
+
+media/ Material Symbols SVG sprite
+----------------------------------
+Icons from Google Material Symbols, licensed under the Apache License 2.0.
+https://fonts.google.com/icons
