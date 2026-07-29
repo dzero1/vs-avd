@@ -426,6 +426,9 @@ navRecentsBtn.addEventListener('click', navKey('KEYCODE_APP_SWITCH'));
 
 const DRAG_THRESHOLD = 0.012; // fraction of the screen before a press is a drag
 const DRAG_SEGMENT_MS = 90; // matches measured shell round-trip; shorter just queues
+// Matches Android's default long_press_timeout, so the cursor cue appears at the
+// same moment the device would begin treating the press as a long one.
+const LONG_PRESS_MS = 400;
 
 let pointer;
 
@@ -440,7 +443,21 @@ function normalize(event) {
 canvas.addEventListener('pointerdown', (event) => {
   if (event.button !== 0) return;
   const at = normalize(event);
-  pointer = { ...at, startX: at.nx, startY: at.ny, lastSent: 0, dragging: false };
+  pointer = {
+    ...at,
+    startX: at.nx,
+    startY: at.ny,
+    lastSent: 0,
+    dragging: false,
+    // How long the button stays down decides tap vs long press.
+    downAt: performance.now()
+  };
+
+  // Nothing is sent until release, so without a cue a held press looks like the
+  // view has frozen. The cursor change marks the moment it becomes a long press.
+  pointer.holdTimer = setTimeout(() => {
+    if (pointer && !pointer.dragging) canvas.classList.add('holding');
+  }, LONG_PRESS_MS);
   canvas.setPointerCapture(event.pointerId);
   event.preventDefault();
 });
@@ -452,58 +469,84 @@ canvas.addEventListener('pointermove', (event) => {
     Math.hypot(at.nx - pointer.startX, at.ny - pointer.startY) > DRAG_THRESHOLD;
 
   if (!pointer.dragging && !movedFar) return;
-  if (!pointer.dragging) canvas.classList.add('dragging');
-  pointer.dragging = true;
+  if (!pointer.dragging) {
+    canvas.classList.add('dragging');
+    // Moving cancels the long press: this is a drag now.
+    clearTimeout(pointer.holdTimer);
+    canvas.classList.remove('holding');
+    pointer.dragging = true;
+    // Put the finger down where the press actually began, not where it is now,
+    // so the gesture's direction and velocity match what the user did.
+    vscode.postMessage({ type: 'gestureStart', nx: pointer.startX, ny: pointer.startY });
+  }
 
-  // Emit the drag as a chain of short native swipes. Throttling to the shell's
-  // real round-trip keeps the queue from growing faster than it drains.
+  // One continuous gesture: the finger stays down and only moves. Chaining
+  // separate swipes instead made each segment a complete touch that lifted at
+  // the end, which Android read as a series of small flings — that is what made
+  // a swipe-to-close in recents jump around.
+  //
+  // Moves are still throttled to the shell's round-trip so the queue cannot
+  // grow faster than it drains, but a dropped move now costs only positional
+  // detail rather than breaking the gesture apart.
   const now = performance.now();
   if (now - pointer.lastSent < DRAG_SEGMENT_MS) return;
   pointer.lastSent = now;
 
-  vscode.postMessage({
-    type: 'swipe',
-    nx1: pointer.nx,
-    ny1: pointer.ny,
-    nx2: at.nx,
-    ny2: at.ny,
-    duration: DRAG_SEGMENT_MS
-  });
+  vscode.postMessage({ type: 'gestureMove', nx: at.nx, ny: at.ny });
   pointer.nx = at.nx;
   pointer.ny = at.ny;
 });
 
 function endPointer(event) {
   if (!pointer) return;
+  // Only the left button's release ends the gesture. pointerdown ignores the
+  // other buttons, but pointerup did not, so clicking the middle (or right)
+  // button while dragging released the pointer here and sent a phantom tap.
+  if (event.button !== 0) return;
+  clearTimeout(pointer.holdTimer);
   const at = normalize(event);
 
   if (pointer.dragging) {
-    // Flush whatever is left so the gesture ends where the mouse actually is.
-    if (at.nx !== pointer.nx || at.ny !== pointer.ny) {
-      vscode.postMessage({
-        type: 'swipe',
-        nx1: pointer.nx,
-        ny1: pointer.ny,
-        nx2: at.nx,
-        ny2: at.ny,
-        duration: DRAG_SEGMENT_MS
-      });
-    }
+    // Only the end point is sent: the extension interpolates the last stretch
+    // into a burst of moves so the release carries enough velocity to fling.
+    // Sending a separate final move here would consume that travel and leave the
+    // burst with nothing to describe.
+    vscode.postMessage({ type: 'gestureEnd', nx: at.nx, ny: at.ny });
   } else {
-    vscode.postMessage({ type: 'tap', nx: at.nx, ny: at.ny });
+    // The device turns a held press into a long press itself, so just report
+    // how long the button was actually down.
+    vscode.postMessage({
+      type: 'tap',
+      nx: at.nx,
+      ny: at.ny,
+      holdMs: Math.round(performance.now() - pointer.downAt)
+    });
   }
 
   pointer = undefined;
-  canvas.classList.remove('dragging');
+  canvas.classList.remove('dragging', 'holding');
   if (canvas.hasPointerCapture?.(event.pointerId)) {
     canvas.releasePointerCapture(event.pointerId);
   }
 }
 
 canvas.addEventListener('pointerup', endPointer);
+
+// A middle click otherwise triggers the browser's autoscroll and fires auxclick;
+// neither means anything to the device, and both read as a stray interaction.
+canvas.addEventListener('auxclick', (event) => event.preventDefault());
+canvas.addEventListener('contextmenu', (event) => event.preventDefault());
 canvas.addEventListener('pointercancel', () => {
+  if (pointer) {
+    clearTimeout(pointer.holdTimer);
+    // Lift the finger, otherwise the device keeps tracking a touch that the
+    // browser has already abandoned and later input goes nowhere.
+    if (pointer.dragging) {
+      vscode.postMessage({ type: 'gestureEnd', nx: pointer.nx, ny: pointer.ny });
+    }
+  }
   pointer = undefined;
-  canvas.classList.remove('dragging');
+  canvas.classList.remove('dragging', 'holding');
 });
 
 // Wheel scroll. Deltas are accumulated and flushed on a timer so a burst of

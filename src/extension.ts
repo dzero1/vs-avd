@@ -13,6 +13,11 @@ const BOOT_TIMEOUT_MS = 180_000;
 
 // screenrecord caps every session at 180s, so the stream is relaunched in a
 // loop. Each relaunch emits a fresh SPS/PPS + keyframe, which the decoder needs.
+// Android's default long_press_timeout is 400ms; a press held at least this
+// long is sent as a held gesture so the device can recognise it. Measured on
+// device: 400ms fires the long press, 300ms does not.
+const LONG_PRESS_MIN_MS = 400;
+
 const STREAM_SEGMENT_SECONDS = 170;
 const STREAM_BITRATE = 8_000_000;
 
@@ -30,6 +35,11 @@ class EmulatorSession {
   // physical coordinates, but the video is rotated, so this is what reconciles
   // a click on the canvas with the point it maps to on the device.
   private rotation = 0;
+  // True between a gesture's DOWN and UP, so stray moves are ignored and an
+  // interrupted drag can be cancelled rather than leaving a finger held down.
+  private gestureActive = false;
+  // Last point sent during a drag, so the release burst can interpolate from it.
+  private gestureLast: { x: number; y: number } | undefined;
   private panel: vscode.WebviewPanel | undefined;
   private avdName = '';
   private readonly outputChannel: vscode.OutputChannel;
@@ -86,10 +96,19 @@ class EmulatorSession {
         await this.stop();
         break;
       case 'tap':
-        this.tap(message.nx, message.ny);
+        this.tap(message.nx, message.ny, message.holdMs);
         break;
       case 'swipe':
         this.swipe(message.nx1, message.ny1, message.nx2, message.ny2, message.duration);
+        break;
+      case 'gestureStart':
+        this.gestureStart(message.nx, message.ny);
+        break;
+      case 'gestureMove':
+        this.gestureMove(message.nx, message.ny);
+        break;
+      case 'gestureEnd':
+        this.gestureEnd(message.nx, message.ny);
         break;
       case 'scroll':
         this.scroll(message.nx, message.ny, message.dx, message.dy);
@@ -719,13 +738,109 @@ class EmulatorSession {
     };
   }
 
-  private tap(nx: number, ny: number): void {
+  // A press is a tap or a long press depending only on how long the button was
+  // held; the webview reports that and the device decides, so this honours
+  // whatever long_press_timeout the user has configured (400ms by default)
+  // rather than hard-coding a threshold here.
+  private tap(nx: number, ny: number, holdMs?: number): void {
     if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
       return;
     }
     const { x, y } = this.toDevice(nx, ny);
+    const hold = Number.isFinite(holdMs) ? Math.min(Math.max(Math.round(holdMs as number), 0), 10_000) : 0;
+
+    // `input tap` is instantaneous, so it can never produce a long press. A
+    // swipe that starts and ends on the same point holds the finger down for the
+    // requested duration — verified on device: identical coordinates fire the
+    // launcher's long-press menu at >=400ms and nothing below it.
+    if (hold >= LONG_PRESS_MIN_MS) {
+      this.log(`long press (${x}, ${y}) for ${hold}ms`);
+      this.sendInput([`input swipe ${x} ${y} ${x} ${y} ${hold}`]);
+      return;
+    }
+
     this.log(`tap (${x}, ${y})`);
     this.sendInput([`input tap ${x} ${y}`]);
+  }
+
+  // --- continuous drag ------------------------------------------------------
+
+  // A drag used to be sent as a chain of separate `input swipe` calls, but each
+  // swipe is a COMPLETE gesture — finger down, move, finger *up*. Android saw
+  // many short flings instead of one drag, which made a swipe-to-close in
+  // recents jump up and down as each segment ended and settled.
+  //
+  // `input motionevent` keeps a single finger down across all the moves, so the
+  // whole drag arrives as one continuous gesture with real velocity tracking.
+  private gestureStart(nx: number, ny: number): void {
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+      return;
+    }
+    const { x, y } = this.toDevice(nx, ny);
+    this.gestureActive = true;
+    this.gestureLast = { x, y };
+    this.log(`gesture down (${x}, ${y})`);
+    this.sendInput([`input motionevent DOWN ${x} ${y}`]);
+  }
+
+  private gestureMove(nx: number, ny: number): void {
+    if (!this.gestureActive || !Number.isFinite(nx) || !Number.isFinite(ny)) {
+      return;
+    }
+    const { x, y } = this.toDevice(nx, ny);
+    this.gestureLast = { x, y };
+    this.sendInput([`input motionevent MOVE ${x} ${y}`]);
+  }
+
+  // The release decides whether a swipe flings or settles back, and Android
+  // derives that purely from how fast the last few samples moved.
+  //
+  // Moves arrive at the webview's throttle interval (~90ms), which is far slower
+  // than a real touchscreen, so the tracker sees almost no velocity and a
+  // swipe-to-close just falls back — measured 0/2 closes at that cadence. The
+  // fix is to send the last stretch as a burst: several interpolated moves plus
+  // the UP in one write, with no delay between them, which restores a realistic
+  // release speed. Measured 3/3 closes with the burst.
+  private gestureEnd(nx: number, ny: number): void {
+    if (!this.gestureActive) {
+      return;
+    }
+    this.gestureActive = false;
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+      return;
+    }
+
+    const to = this.toDevice(nx, ny);
+    const from = this.gestureLast ?? to;
+    this.gestureLast = undefined;
+
+    // Interpolate from the last reported point to the release point so the
+    // burst describes real motion rather than one long jump.
+    const commands: string[] = [];
+    const STEPS = 3;
+    for (let step = 1; step <= STEPS; step += 1) {
+      const t = step / STEPS;
+      const x = Math.round(from.x + (to.x - from.x) * t);
+      const y = Math.round(from.y + (to.y - from.y) * t);
+      commands.push(`input motionevent MOVE ${x} ${y}`);
+    }
+    commands.push(`input motionevent UP ${to.x} ${to.y}`);
+
+    this.log(`gesture up (${to.x}, ${to.y}) with a ${STEPS}-step release burst`);
+    // One write: sendInput joins these with newlines so the shell runs them
+    // back-to-back with no round-trip between each.
+    this.sendInput(commands);
+  }
+
+  // Releases a half-finished gesture so a stuck finger cannot block later input
+  // (e.g. the panel is closed or the stream stops mid-drag).
+  private cancelGesture(): void {
+    if (!this.gestureActive) {
+      return;
+    }
+    this.gestureActive = false;
+    this.log('gesture cancelled');
+    this.sendInput(['input motionevent CANCEL 0 0']);
   }
 
   // `input swipe` is one native gesture with real fling physics, so a drag maps
@@ -794,6 +909,9 @@ class EmulatorSession {
     // Invalidate any in-flight boot wait before tearing anything down, so it
     // cannot post progress or a timeout failure into the stopped session.
     this.sessionGeneration += 1;
+
+    // Release a drag still in progress before the input shell goes away.
+    this.cancelGesture();
 
     this.stopVideoStream();
     this.stopInputShell();

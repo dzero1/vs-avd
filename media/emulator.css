@@ -273,6 +273,12 @@ canvas#screen.dragging {
   cursor: grabbing;
 }
 
+/* A held press sends nothing until release, so the cursor is the only signal
+   that it has become a long press rather than a tap. */
+canvas#screen.holding {
+  cursor: cell;
+}
+
 .stage:focus {
   outline: none;
 }
