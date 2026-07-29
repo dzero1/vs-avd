@@ -238,9 +238,11 @@ select#avdSelect:disabled {
   overflow: auto;
   display: grid;
   place-items: center;
-  /* Extra clearance at the top so a zoomed-in screen scrolled to its very top
-     still sits clear of the toolbar rather than touching it. */
-  padding: 28px 18px 18px;
+  /* No padding here: a scroll container drops its end-side padding once the
+     content overflows, so a zoomed-in screen would lose its bottom and right
+     gap. The spacing lives on the frame's transparent border instead, which is
+     part of the scrollable box and survives at any zoom. */
+  padding: 0;
   background:
     radial-gradient(circle at 50% 0%, color-mix(in srgb, var(--vscode-foreground) 5%, transparent), transparent 60%),
     var(--surface);
@@ -263,6 +265,24 @@ select#avdSelect:disabled {
      scrollport can never reach. The grid's own centring is left alone so the
      loader and placeholder stay put. */
   margin: auto;
+  /* The gap around the screen, as a transparent border rather than stage
+     padding: a scroll container drops its end-side padding once the content
+     overflows, which lost the bottom and right gap as soon as you zoomed in. A
+     border belongs to the frame's own box, so it stays scrollable at any zoom.
+     The decoration moves to the canvas (below) so it still hugs the picture
+     rather than this spacing border. */
+  border: 18px solid transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+/* With the spacing border on the frame, the rounding, black backing and shadow
+   belong on the canvas so they sit against the screen edge. */
+.stage--live canvas#screen {
+  border-radius: 12px;
+  background: #000;
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.45), 0 0 0 1px var(--line);
 }
 
 .stage--live .placeholder {
@@ -292,7 +312,7 @@ canvas#screen.holding {
 }
 
 /* A quiet ring shows the screen has keyboard focus, since typing goes there. */
-.stage--live:focus-visible .screen-frame {
+.stage--live:focus-visible canvas#screen {
   box-shadow: 0 6px 28px rgba(0, 0, 0, 0.45), 0 0 0 2px var(--vscode-focusBorder);
 }
 
