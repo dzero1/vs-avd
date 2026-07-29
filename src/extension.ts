@@ -24,6 +24,11 @@ const LONG_PRESS_MIN_MS = 400;
 // is raised to clear that boundary rather than being sent as a stray tap.
 const MIN_SCROLL_TRAVEL_PX = 26;
 
+// A scroll swipe must also last long enough not to read as a tap. Measured on
+// device: 26px over 10ms or 20ms still clicks; 40ms and above does not. 80ms
+// keeps a comfortable margin while staying responsive to the wheel.
+const SCROLL_DURATION_MS = 80;
+
 const STREAM_SEGMENT_SECONDS = 170;
 const STREAM_BITRATE = 8_000_000;
 
@@ -46,6 +51,9 @@ class EmulatorSession {
   private gestureActive = false;
   // Last point sent during a drag, so the release burst can interpolate from it.
   private gestureLast: { x: number; y: number } | undefined;
+  // Serializes scroll gestures; only the newest queued scroll is kept.
+  private scrollBusy = false;
+  private pendingScroll: { x: number; y: number; endX: number; endY: number } | undefined;
   private panel: vscode.WebviewPanel | undefined;
   private avdName = '';
   private readonly outputChannel: vscode.OutputChannel;
@@ -136,6 +144,13 @@ class EmulatorSession {
         break;
       case 'emu':
         await this.emuCommand(message.args, message.label, message.freeText);
+        break;
+      case 'logWheel':
+        // Wheel diagnostics from the webview, so a stray-tap report can be traced
+        // to the actual deltas that produced it.
+        if (typeof message.detail === 'string') {
+          this.log(`wheel: ${message.detail.slice(0, 200)}`);
+        }
         break;
       case 'showLogs':
         this.outputChannel.show(true);
@@ -898,8 +913,42 @@ class EmulatorSession {
       return;
     }
 
-    this.log(`scroll at (${x}, ${y}) by (${travelX}, ${travelY})`);
-    this.sendInput([`input swipe ${x} ${y} ${endX} ${endY} 80`]);
+    // Overlapping scroll swipes are what still produced stray taps: each
+    // `input swipe` is its own gesture ending in a lift, and two of them in
+    // flight at once interleave into a DOWN/UP pair the device reads as a click
+    // — measured 4/5 stray clicks with rapid successive notches. Coalescing keeps
+    // exactly one scroll gesture on the device at a time.
+    if (this.scrollBusy) {
+      this.pendingScroll = { x, y, endX, endY };
+      return;
+    }
+
+    void this.runScroll(x, y, endX, endY);
+  }
+
+  // Runs one scroll gesture at a time. `input swipe` returns as soon as the
+  // command is queued, not when the gesture finishes, so the duration is waited
+  // out explicitly before the next one is allowed to start.
+  private async runScroll(x: number, y: number, endX: number, endY: number): Promise<void> {
+    this.scrollBusy = true;
+    try {
+      this.log(`scroll (${x}, ${y}) -> (${endX}, ${endY})`);
+      this.sendInput([`input swipe ${x} ${y} ${endX} ${endY} ${SCROLL_DURATION_MS}`]);
+      // A margin over the gesture duration, so the lift has landed before the
+      // next DOWN goes out.
+      await this.delay(SCROLL_DURATION_MS + 40);
+    } finally {
+      this.scrollBusy = false;
+    }
+
+    // Only the most recent queued scroll is replayed: intermediate notches during
+    // a fast spin are stale by now, and replaying them all would lag behind the
+    // wheel and keep the device busy long after the user stopped.
+    const next = this.pendingScroll;
+    this.pendingScroll = undefined;
+    if (next && this.state === 'STREAMING') {
+      await this.runScroll(next.x, next.y, next.endX, next.endY);
+    }
   }
 
   private keyEvent(keycode: string, meta: string[] | undefined): void {

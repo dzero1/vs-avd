@@ -561,7 +561,10 @@ canvas.addEventListener(
     // A wheel turn mid-drag would inject a separate swipe into the gesture that
     // is already in flight, so scrolling is ignored while a press is held. This
     // also covers a middle-button press that emits wheel events of its own.
-    if (pointer) return;
+    if (pointer) {
+      vscode.postMessage({ type: 'logWheel', detail: 'ignored: press held' });
+      return;
+    }
     const at = normalize(event);
     // deltaMode 1 is lines, 2 is pages; normalize everything to rough pixels.
     const factor = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
@@ -569,6 +572,13 @@ canvas.addEventListener(
     wheelAccum.dy += event.deltaY * factor;
     wheelAccum.nx = at.nx;
     wheelAccum.ny = at.ny;
+
+    vscode.postMessage({
+      type: 'logWheel',
+      detail:
+        `event dy=${event.deltaY} dx=${event.deltaX} mode=${event.deltaMode} ` +
+        `-> accum dy=${wheelAccum.dy.toFixed(1)} dx=${wheelAccum.dx.toFixed(1)}`
+    });
 
     if (wheelTimer) return;
     wheelTimer = setTimeout(() => {
@@ -578,7 +588,10 @@ canvas.addEventListener(
       if (dx === 0 && dy === 0) return;
       // A scroll must never reach the device as a tap. Anything below this is
       // scaled up on the extension side to clear the platform's tap slop.
-      if (Math.hypot(dx, dy) < 1) return;
+      if (Math.hypot(dx, dy) < 1) {
+        vscode.postMessage({ type: 'logWheel', detail: `flush dropped: |delta|<1 (${dx}, ${dy})` });
+        return;
+      }
       // Scale up: a wheel notch should move more than its pixel delta suggests.
       vscode.postMessage({ type: 'scroll', nx, ny, dx: dx * 2.5, dy: dy * 2.5 });
     }, 60);
