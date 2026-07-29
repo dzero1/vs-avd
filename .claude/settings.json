@@ -20,7 +20,15 @@
       "Bash(xargs -I{} echo \"matching lines: {}\")",
       "Bash(node --check media/emulator.js)",
       "Bash(lsof -nP -iTCP:5554 -iTCP:5555)",
-      "Bash(rtk ps *)"
+      "Bash(rtk ps *)",
+      "Bash(adb kill-server *)",
+      "Bash(adb start-server *)",
+      "Bash(echo \"launched, pid $!\")",
+      "Bash(sed -n '/private streamSize/,/^  }/p' src/extension.ts)",
+      "Bash(timeout 12 adb exec-out screenrecord --output-format=h264 --time-limit=8 --bit-rate=2000000 -)",
+      "Bash(xargs -I{} echo \"  accelerometer_rotation={}\")",
+      "Bash(xargs -I{} echo \"  user_rotation={}\")",
+      "Bash(echo \"TSC EXIT=$?\")"
     ]
   }
 }

@@ -21,6 +21,9 @@ class EmulatorSession {
   private emulatorProcess: cp.ChildProcess | undefined;
   private streamProcess: cp.ChildProcess | undefined;
   private streamGeneration = 0;
+  // Bumped by every start/stop. A boot wait belonging to an earlier session must
+  // not report progress or failure over the top of a newer one.
+  private sessionGeneration = 0;
   // Physical, rotation-independent resolution, as reported by `wm size`.
   private screenSize: { width: number; height: number } | undefined;
   // Current display rotation (0-3). `wm size` and `input tap` both work in
@@ -129,6 +132,17 @@ class EmulatorSession {
       return;
     }
 
+    // A second start would spawn a second emulator and a second boot wait; the
+    // older wait then reports its own timeout over the newer session, which
+    // reads as "stuck, then stopped". The webview disables its button, but a
+    // reloaded webview or a queued message can still get here.
+    if (this.state !== 'IDLE' && this.state !== 'STOPPED') {
+      this.log(`Ignoring start while in state ${this.state}.`);
+      return;
+    }
+
+    const generation = (this.sessionGeneration += 1);
+
     this.avdName = avdName;
     if (this.panel) {
       this.panel.title = avdName;
@@ -154,20 +168,36 @@ class EmulatorSession {
         this.log(`Emulator process spawned for ${avdName}`);
       });
 
+      // The launcher exits as soon as it has handed off to the detached
+      // qemu-system-* process, so its exit says nothing about whether the AVD
+      // is running. Treating it as a shutdown forced STOPPED mid-boot while the
+      // boot wait kept polling — the "shutting down, then stuck" symptom. Boot
+      // progress is tracked by polling adb instead, so this is only logged.
       this.emulatorProcess.on('exit', (code, signal) => {
-        this.log(`Emulator process exited with code ${code ?? 'n/a'} and signal ${signal ?? 'n/a'}`);
-        if (this.state !== 'STOPPED') {
-          this.setState('STOPPED');
-        }
+        this.log(
+          `Emulator launcher exited with code ${code ?? 'n/a'} and signal ${signal ?? 'n/a'} ` +
+            '(the AVD itself runs as a separate process).'
+        );
       });
 
       this.emulatorProcess.on('error', (error) => {
         this.log(`Emulator launch failed: ${error.message}`);
+        // spawn() genuinely failed (e.g. `emulator` not on PATH), so this does
+        // mean no AVD is coming.
+        if (generation !== this.sessionGeneration) {
+          return;
+        }
         vscode.window.showErrorMessage(`Unable to start emulator: ${error.message}`);
         this.setState('STOPPED');
       });
 
-      await this.waitForBoot();
+      await this.waitForBoot(generation);
+      // A stop (or another start) landed while the boot wait was in flight, so
+      // this session is no longer the current one.
+      if (generation !== this.sessionGeneration) {
+        this.log('Abandoning superseded start.');
+        return;
+      }
       this.screenSize = await this.detectScreenSize();
       // A snapshot can resume already rotated, so start from the real value
       // rather than assuming portrait.
@@ -181,6 +211,10 @@ class EmulatorSession {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`Start failed: ${message}`);
+      // A failure from a superseded session must not tear down the current one.
+      if (generation !== this.sessionGeneration) {
+        return;
+      }
       vscode.window.showErrorMessage(message);
       this.setState('STOPPED');
     }
@@ -193,14 +227,21 @@ class EmulatorSession {
     this.sendToWebview({ type: 'boot', phase, detail });
   }
 
-  private async waitForBoot(): Promise<void> {
+  private async waitForBoot(generation: number): Promise<void> {
     const deadline = Date.now() + BOOT_TIMEOUT_MS;
     let sawDevice = false;
     let sawShell = false;
 
     this.reportBootProgress('starting');
 
-    for (let attempt = 0; Date.now() < deadline; attempt += 1) {
+    // Abandoned as soon as the session is superseded, so a stale wait can neither
+    // post progress into a newer session nor throw a timeout that stops it.
+    while (Date.now() < deadline) {
+      if (generation !== this.sessionGeneration) {
+        this.log('Boot wait cancelled: session superseded.');
+        return;
+      }
+
       if (!sawDevice) {
         const devices = await this.runAdb(['devices']).catch(() => undefined);
         if (devices?.stdout.includes('emulator-')) {
@@ -234,6 +275,12 @@ class EmulatorSession {
       const elapsed = Math.round((BOOT_TIMEOUT_MS - (deadline - Date.now())) / 1000);
       this.reportBootProgress(sawShell ? 'booting' : sawDevice ? 'shell' : 'starting', `${elapsed}s`);
       await this.delay(1500);
+    }
+
+    // Only the current session may fail loudly; a superseded one exits silently.
+    if (generation !== this.sessionGeneration) {
+      this.log('Boot wait expired for a superseded session; ignoring.');
+      return;
     }
 
     throw new Error('Timed out waiting for the Android emulator to finish booting.');
@@ -285,8 +332,13 @@ class EmulatorSession {
     if (!this.screenSize) {
       return undefined;
     }
+    // Must follow the rotation. screenrecord honours --size literally, so
+    // passing the portrait dimensions while the device is landscape encodes a
+    // portrait frame and the stream never appears to rotate — verified by
+    // decoding the SPS of a real capture.
+    const size = this.visibleSize();
     const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
-    return `${even(this.screenSize.width / 2)}x${even(this.screenSize.height / 2)}`;
+    return `${even(size.width / 2)}x${even(size.height / 2)}`;
   }
 
   private startVideoStream(): void {
@@ -445,32 +497,37 @@ class EmulatorSession {
     }
 
     try {
-      const current = await this.runAdb(['shell', 'settings', 'get', 'system', 'user_rotation']);
-      const value = Number.parseInt(current.stdout.trim(), 10);
-      const from = Number.isInteger(value) && value >= 0 && value <= 3 ? value : 0;
+      // Start from what the display actually shows, not from the stored
+      // setting: the two disagree whenever an app has overridden rotation.
+      const from = (await this.readDisplayRotation()) ?? 0;
       // Rotation values step counter-clockwise: 0=portrait, 1=landscape-left,
       // 2=portrait-flipped, 3=landscape-right.
       const next = (from + (direction === 'left' ? 1 : 3)) % 4;
 
-      this.log(`Rotating ${direction}: user_rotation ${from} -> ${next}`);
-      await this.runAdb(['shell', 'settings', 'put', 'system', 'accelerometer_rotation', '0']);
-      await this.runAdb(['shell', 'settings', 'put', 'system', 'user_rotation', String(next)]);
+      this.log(`Rotating ${direction}: ${from} -> ${next}`);
 
-      // The window manager takes a moment to react, and an orientation-locked
-      // activity may refuse outright, so the effective rotation is read back
-      // rather than assumed.
-      await this.delay(700);
-      const applied = await this.readDisplayRotation();
+      // `settings put user_rotation` alone is silently ignored whenever the
+      // foreground activity pins its own orientation — which the launcher and
+      // much of the system UI do on a phone-class AVD, so the button appeared
+      // to do nothing on the home screen. Telling the display to be fixed to
+      // the user rotation makes it override the app's request; verified to
+      // rotate the launcher, which no other method managed.
+      await this.runAdb(['shell', 'wm', 'fixed-to-user-rotation', 'enabled']);
+      await this.runAdb(['shell', 'wm', 'user-rotation', 'lock', String(next)]);
+
+      // The window manager takes a moment to react (measured 130-480ms), and an
+      // orientation-locked activity may refuse outright, so the effective
+      // rotation is polled rather than assumed after one fixed delay.
+      const applied = await this.awaitRotation(next);
       this.rotation = applied ?? next;
 
       if (applied !== undefined && applied !== next) {
-        // A foreground activity pinned to one orientation (the launcher does
-        // this) silently overrides user_rotation. Say so, because the button
-        // otherwise looks broken.
+        // Rotation is forced at the display level now, so a mismatch here is
+        // unexpected rather than a normal app-orientation lock.
         this.log(`Rotation requested ${next} but the display reports ${applied}.`);
         this.sendToWebview({
           type: 'status',
-          message: 'The current app is locked to one orientation',
+          message: 'The device did not accept the rotation',
           kind: 'error'
         });
       } else {
@@ -496,6 +553,22 @@ class EmulatorSession {
       this.log(`Rotate failed: ${message}`);
       this.sendToWebview({ type: 'status', message: `Rotate failed: ${message}`, kind: 'error' });
     }
+  }
+
+  // Polls until the window manager reports the requested rotation, so a slow
+  // reaction is not mistaken for an orientation-locked app. Returns the last
+  // observed rotation, which stays at the old value when an app refuses to turn.
+  private async awaitRotation(want: number): Promise<number | undefined> {
+    let last: number | undefined;
+    // Measured settle time is 130-480ms; this allows ~2s before giving up.
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await this.delay(250);
+      last = await this.readDisplayRotation();
+      if (last === want) {
+        return last;
+      }
+    }
+    return last;
   }
 
   // The rotation the window manager actually settled on, which can differ from
@@ -718,12 +791,38 @@ class EmulatorSession {
   }
 
   private async stop(): Promise<void> {
+    // Invalidate any in-flight boot wait before tearing anything down, so it
+    // cannot post progress or a timeout failure into the stopped session.
+    this.sessionGeneration += 1;
+
     this.stopVideoStream();
     this.stopInputShell();
     this.sendToWebview({ type: 'rotation', rotation: 0 });
 
+    // `emulator` is only a launcher: the real VM is a detached
+    // qemu-system-* process that outlives it, so killing the handle we hold
+    // leaves the AVD running and the console port busy. The console's own kill
+    // command is what actually shuts the VM down.
+    const wasRunning = this.state === 'STREAMING' || this.state === 'BOOTING_EMULATOR' || this.state === 'BOOTED';
+
+    // Rotating forces the display to ignore app orientation requests. That is
+    // persistent device state, so hand the AVD back rotation-free rather than
+    // leaving it stuck for Studio or anything else that attaches later.
+    if (this.state === 'STREAMING' && this.rotation !== 0) {
+      this.log('Releasing the forced display rotation.');
+      await this.runAdb(['shell', 'wm', 'user-rotation', 'free']).catch(() => undefined);
+      await this.runAdb(['shell', 'wm', 'fixed-to-user-rotation', 'default']).catch(() => undefined);
+    }
+
+    if (wasRunning) {
+      this.log('Asking the emulator console to shut down.');
+      await this.runAdb(['emu', 'kill']).catch((error) =>
+        this.log(`Console shutdown failed: ${error instanceof Error ? error.message : String(error)}`)
+      );
+    }
+
     if (this.emulatorProcess && !this.emulatorProcess.killed) {
-      this.log('Stopping emulator process.');
+      this.log('Stopping emulator launcher process.');
       this.emulatorProcess.kill();
     }
     this.emulatorProcess = undefined;
