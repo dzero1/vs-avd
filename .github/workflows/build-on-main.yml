@@ -1,0 +1,57 @@
+name: Build & Bump Version
+
+on:
+  push:
+    branches: [main]
+
+# Prevent overlapping runs racing to push version bumps.
+concurrency:
+  group: build-on-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Skip the run triggered by our own version-bump commit.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Bump build number
+        id: bump
+        run: |
+          npm version patch --no-git-tag-version
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Package extension
+        run: npx vsce package --out "vs-avd-${{ steps.bump.outputs.version }}.vsix"
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip ci]"
+          git push origin HEAD:main
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vs-avd-${{ steps.bump.outputs.version }}
+          path: "*.vsix"
