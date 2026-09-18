@@ -2,7 +2,7 @@
   "name": "vs-avd",
   "displayName": "Android Emulator Viewer",
   "description": "View and interact with Android AVDs from inside VS Code",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "D0Tech",
   "license": "MIT",
   "icon": "media/icon.png",
